@@ -1,0 +1,13 @@
+{
+  "name": "leadloop",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev:dashboard": "pnpm --filter leadloop-dashboard dev",
+    "dev:worker": "pnpm --filter leadloop-worker dev",
+    "build:dashboard": "pnpm --filter leadloop-dashboard build",
+    "deploy:worker": "pnpm --filter leadloop-worker deploy",
+    "lint": "pnpm --filter leadloop-dashboard lint",
+    "test": "pnpm --filter leadloop-worker test"
+  }
+}
