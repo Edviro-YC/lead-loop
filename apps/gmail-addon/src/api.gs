@@ -3,7 +3,7 @@
  * All business logic lives in the backend; the add-on is a thin UI surface.
  */
 
-var API_BASE = PropertiesService.getScriptProperties().getProperty('WORKER_URL') || 'https://leadloop-worker.your-subdomain.workers.dev';
+var API_BASE = PropertiesService.getScriptProperties().getProperty('WORKER_URL') || 'https://leadloop-worker.tanujsiripurapu.workers.dev';
 
 function getApiKey_() {
   return PropertiesService.getUserProperties().getProperty('ADDON_API_KEY') || '';
