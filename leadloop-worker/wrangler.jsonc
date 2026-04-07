@@ -1,0 +1,42 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "leadloop-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-03-10",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": { "enabled": true },
+	"upload_source_maps": true,
+	"placement": { "mode": "smart" },
+
+	"vars": {
+		"SUPABASE_URL": "https://kmncrezhcejryhseqgow.supabase.co",
+		"SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImttbmNyZXpoY2Vqcnloc2VxZ293Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5MjcyOTcsImV4cCI6MjA5MDUwMzI5N30.R4A2RcKOsYfiHxND3ginPJt85zDaiqa8ImVoFWMCGIw",
+		"DASHBOARD_URL": "https://leadloop-dashboard.tanujsiripurapu.workers.dev"
+	},
+	// Secrets (set via `wrangler secret put`):
+	//   SUPABASE_SERVICE_ROLE_KEY
+	//   OPENAI_API_KEY
+	//   GOOGLE_CLIENT_ID
+	//   GOOGLE_CLIENT_SECRET
+	//   ADDON_API_KEY
+
+	"queues": {
+		"producers": [
+			{ "binding": "THREAD_SYNC_QUEUE", "queue": "leadloop-thread-sync" },
+			{ "binding": "FOLLOW_UP_DRAFT_QUEUE", "queue": "leadloop-follow-up-draft" },
+			{ "binding": "EMBED_EXAMPLE_QUEUE", "queue": "leadloop-embed-example" }
+		],
+		"consumers": [
+			{ "queue": "leadloop-thread-sync", "max_batch_size": 10, "max_retries": 3 },
+			{ "queue": "leadloop-follow-up-draft", "max_batch_size": 5, "max_retries": 3 },
+			{ "queue": "leadloop-embed-example", "max_batch_size": 10, "max_retries": 3 }
+		]
+	},
+
+	"triggers": {
+		"crons": [
+			"*/5 * * * *",
+			"* * * * *"
+		]
+	}
+}
