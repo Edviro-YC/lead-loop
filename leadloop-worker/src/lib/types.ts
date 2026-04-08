@@ -20,6 +20,9 @@ export interface AppBindings {
   GOOGLE_CLIENT_SECRET: string
   ADDON_API_KEY: string
 
+  // Optional
+  DEBUG?: string
+
   // Queue producer bindings
   THREAD_SYNC_QUEUE: Queue
   FOLLOW_UP_DRAFT_QUEUE: Queue

@@ -3,7 +3,13 @@
  * All business logic lives in the backend; the add-on is a thin UI surface.
  */
 
-var API_BASE = PropertiesService.getScriptProperties().getProperty('WORKER_URL') || 'https://leadloop-worker.tanujsiripurapu.workers.dev';
+var API_BASE = PropertiesService.getScriptProperties().getProperty('WORKER_URL');
+if (!API_BASE) throw new Error('Set WORKER_URL in Script Properties (Extensions > Apps Script > Project Settings)');
+var DEBUG_ = PropertiesService.getScriptProperties().getProperty('DEBUG') === 'true';
+
+function debugLog_(msg) {
+  if (DEBUG_) console.log('[debug] ' + msg);
+}
 
 function getApiKey_() {
   return PropertiesService.getUserProperties().getProperty('ADDON_API_KEY') || '';
@@ -47,10 +53,10 @@ function fetchContext(gmailThreadId, toEmail) {
   });
 }
 
-function fetchInsertTemplate(templateId, context) {
+function fetchInsertTemplate(templateId, toEmail) {
   return apiRequest_('/addon/insert-template', 'POST', {
     template_id: templateId,
-    context: context || {}
+    to_email: toEmail || null
   });
 }
 

@@ -8,17 +8,18 @@
 	"upload_source_maps": true,
 	"placement": { "mode": "smart" },
 
+	// Set these to your own project values before deploying.
 	"vars": {
-		"SUPABASE_URL": "https://kmncrezhcejryhseqgow.supabase.co",
-		"SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImttbmNyZXpoY2Vqcnloc2VxZ293Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5MjcyOTcsImV4cCI6MjA5MDUwMzI5N30.R4A2RcKOsYfiHxND3ginPJt85zDaiqa8ImVoFWMCGIw",
-		"DASHBOARD_URL": "https://leadloop-dashboard.tanujsiripurapu.workers.dev"
+		"SUPABASE_URL": "https://YOUR_PROJECT_REF.supabase.co",
+		"SUPABASE_ANON_KEY": "YOUR_SUPABASE_ANON_KEY",
+		"DASHBOARD_URL": "https://your-dashboard-url.vercel.app"
 	},
-	// Secrets (set via `wrangler secret put`):
-	//   SUPABASE_SERVICE_ROLE_KEY
-	//   OPENAI_API_KEY
-	//   GOOGLE_CLIENT_ID
-	//   GOOGLE_CLIENT_SECRET
-	//   ADDON_API_KEY
+	// Secrets (set via `wrangler secret put <NAME>`):
+	//   SUPABASE_SERVICE_ROLE_KEY  — Supabase service role key
+	//   OPENAI_API_KEY             — OpenAI API key
+	//   GOOGLE_CLIENT_ID           — Google OAuth client ID
+	//   GOOGLE_CLIENT_SECRET       — Google OAuth client secret
+	//   ADDON_API_KEY              — shared secret between add-on and worker
 
 	"queues": {
 		"producers": [

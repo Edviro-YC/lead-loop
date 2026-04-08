@@ -21,72 +21,57 @@ export async function syncThread(
   env: SyncEnv,
   msg: ThreadSyncMessage
 ): Promise<void> {
-  // Fetch the thread record and the user's Gmail credentials
-  const { data: thread } = await supabase
-    .from('watched_threads')
-    .select('gmail_thread_id, user_id')
-    .eq('id', msg.threadId)
-    .single()
+  const [{ data: thread }, { data: profile }] = await Promise.all([
+    supabase.from('watched_threads').select('gmail_thread_id, user_id').eq('id', msg.threadId).single(),
+    supabase.from('profiles').select('gmail_refresh_token, gmail_email').eq('id', msg.userId).single(),
+  ])
 
   if (!thread) {
     console.error(`Thread ${msg.threadId} not found`)
     return
   }
 
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('gmail_refresh_token, gmail_email')
-    .eq('id', thread.user_id)
-    .single()
-
   if (!profile?.gmail_refresh_token) {
-    console.error(`No Gmail credentials for user ${thread.user_id}`)
+    console.error(`No Gmail credentials for user ${msg.userId}`)
     return
   }
 
-  // Get a fresh access token
   const { access_token } = await refreshAccessToken(
     env.GOOGLE_CLIENT_ID,
     env.GOOGLE_CLIENT_SECRET,
     profile.gmail_refresh_token
   )
 
-  // Fetch the full thread from Gmail
   const gmailThread = await getThread(
     { accessToken: access_token },
     thread.gmail_thread_id
   )
 
-  // Upsert each message
   const userEmail = profile.gmail_email?.toLowerCase() ?? ''
 
-  for (const gmailMsg of gmailThread.messages) {
+  const rows = gmailThread.messages.map((gmailMsg) => {
     const from = getHeader(gmailMsg, 'From')
     const to = getHeader(gmailMsg, 'To')
     const subject = getHeader(gmailMsg, 'Subject')
     const bodyText = extractBody(gmailMsg)
     const sentAt = new Date(parseInt(gmailMsg.internalDate)).toISOString()
-
-    // Determine direction by checking if the "From" contains the user's email
     const direction = from.toLowerCase().includes(userEmail) ? 'sent' : 'received'
 
-    await supabase.from('thread_messages').upsert(
-      {
-        thread_id: msg.threadId,
-        gmail_message_id: gmailMsg.id,
-        direction,
-        from_email: from,
-        to_email: to,
-        subject,
-        body_text: bodyText,
-        snippet: gmailMsg.snippet,
-        sent_at: sentAt,
-      },
-      { onConflict: 'gmail_message_id' }
-    )
-  }
+    return {
+      thread_id: msg.threadId,
+      gmail_message_id: gmailMsg.id,
+      direction,
+      from_email: from,
+      to_email: to,
+      subject,
+      body_text: bodyText,
+      snippet: gmailMsg.snippet,
+      sent_at: sentAt,
+    }
+  })
 
-  // Update thread metadata
+  await supabase.from('thread_messages').upsert(rows, { onConflict: 'gmail_message_id' })
+
   const lastMessage = gmailThread.messages[gmailThread.messages.length - 1]
   await supabase
     .from('watched_threads')

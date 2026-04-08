@@ -7,7 +7,7 @@ function buildErrorCard_(message) {
     .setHeader(CardService.newCardHeader().setTitle('LeadLoop'))
     .addSection(
       CardService.newCardSection().addWidget(
-        CardService.newTextParagraph().setText('⚠ ' + message)
+        CardService.newTextParagraph().setText('Error: ' + message)
       )
     )
     .build();
@@ -15,17 +15,18 @@ function buildErrorCard_(message) {
 
 function buildSetupCard_() {
   return CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('LeadLoop Setup'))
+    .setHeader(CardService.newCardHeader().setTitle('LeadLoop'))
     .addSection(
       CardService.newCardSection()
+        .setHeader('Connect your account')
         .addWidget(CardService.newTextParagraph().setText(
-          'Enter your API key from the LeadLoop dashboard (Settings page) to connect.'
+          'Paste the API key from your LeadLoop dashboard to get started.'
         ))
         .addWidget(
           CardService.newTextInput()
             .setFieldName('api_key')
             .setTitle('API Key')
-            .setHint('Paste your LeadLoop API key')
+            .setHint('Found in Dashboard > Settings')
         )
         .addWidget(
           CardService.newTextButton()
@@ -37,52 +38,63 @@ function buildSetupCard_() {
 }
 
 function buildTemplatePickerSection_(templates) {
-  var section = CardService.newCardSection().setHeader('Insert Template');
+  var section = CardService.newCardSection().setHeader('Templates');
 
   if (!templates || templates.length === 0) {
     section.addWidget(
-      CardService.newTextParagraph().setText('No templates found. Create templates in the dashboard.')
+      CardService.newTextParagraph().setText('No templates yet. Create one in the dashboard.')
     );
     return section;
   }
 
   templates.forEach(function(t) {
-    section.addWidget(
-      CardService.newDecoratedText()
-        .setText(t.name)
-        .setBottomLabel(t.category || '')
-        .setOnClickAction(
-          CardService.newAction()
-            .setFunctionName('onInsertTemplate')
-            .setParameters({ template_id: t.id })
-        )
-    );
+    var icon = CardService.newIconImage().setIcon(CardService.Icon.BOOKMARK);
+    var widget = CardService.newDecoratedText()
+      .setText(t.name)
+      .setStartIcon(icon)
+      .setOnClickAction(
+        CardService.newAction()
+          .setFunctionName('onInsertTemplate')
+          .setParameters({ template_id: t.id })
+      );
+    if (t.category) {
+      widget.setTopLabel(t.category.replace(/_/g, ' '));
+    }
+    section.addWidget(widget);
   });
 
   return section;
 }
 
-function buildThreadActionsSection_(threadId, isWatched) {
-  var section = CardService.newCardSection().setHeader('Thread Actions');
+function buildThreadActionsSection_(threadId, isWatched, subject) {
+  var section = CardService.newCardSection().setHeader('Actions');
 
   if (!isWatched) {
+    var addIcon = CardService.newIconImage().setIcon(CardService.Icon.STAR);
     section.addWidget(
-      CardService.newTextButton()
-        .setText('👁 Watch Thread')
+      CardService.newDecoratedText()
+        .setText('Add to LeadLoop')
+        .setStartIcon(addIcon)
         .setOnClickAction(
           CardService.newAction()
             .setFunctionName('onWatchThread')
-            .setParameters({ thread_id: threadId })
+            .setParameters({ thread_id: threadId, subject: subject || '' })
         )
     );
   } else {
+    var trackedIcon = CardService.newIconImage().setIcon(CardService.Icon.STAR);
     section.addWidget(
-      CardService.newTextParagraph().setText('✓ Thread is being watched')
+      CardService.newDecoratedText()
+        .setTopLabel('STATUS')
+        .setText('Tracked by LeadLoop')
+        .setStartIcon(trackedIcon)
     );
 
+    var clockIcon = CardService.newIconImage().setIcon(CardService.Icon.CLOCK);
     section.addWidget(
-      CardService.newTextButton()
-        .setText('⏰ Set Follow-up')
+      CardService.newDecoratedText()
+        .setText('Set Follow-up')
+        .setStartIcon(clockIcon)
         .setOnClickAction(
           CardService.newAction()
             .setFunctionName('onSetFollowUpForm')
@@ -90,9 +102,11 @@ function buildThreadActionsSection_(threadId, isWatched) {
         )
     );
 
+    var emailIcon = CardService.newIconImage().setIcon(CardService.Icon.EMAIL);
     section.addWidget(
-      CardService.newTextButton()
-        .setText('💡 Suggest Reply')
+      CardService.newDecoratedText()
+        .setText('Suggest Reply')
+        .setStartIcon(emailIcon)
         .setOnClickAction(
           CardService.newAction()
             .setFunctionName('onSuggestReply')
@@ -107,13 +121,19 @@ function buildThreadActionsSection_(threadId, isWatched) {
 function buildLeadInfoSection_(lead) {
   if (!lead) return null;
 
-  var section = CardService.newCardSection().setHeader('Lead Info');
-  section.addWidget(
-    CardService.newDecoratedText()
-      .setText(lead.name || lead.email || 'Unknown')
-      .setBottomLabel(
-        [lead.company, lead.title, lead.status].filter(Boolean).join(' · ')
-      )
-  );
+  var section = CardService.newCardSection().setHeader('Lead');
+  var personIcon = CardService.newIconImage().setIcon(CardService.Icon.PERSON);
+  var widget = CardService.newDecoratedText()
+    .setText(lead.name || 'Unknown')
+    .setStartIcon(personIcon);
+
+  if (lead.company || lead.title) {
+    widget.setTopLabel([lead.title, lead.company].filter(Boolean).join(' at '));
+  }
+  if (lead.status) {
+    widget.setBottomLabel(lead.status);
+  }
+
+  section.addWidget(widget);
   return section;
 }

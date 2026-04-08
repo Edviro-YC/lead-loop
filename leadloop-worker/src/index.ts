@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { AppBindings, AppEnv, ThreadSyncMessage, FollowUpDraftMessage, EmbedExampleMessage } from './lib/types'
 import { createServiceClient } from './lib/supabase'
+import { debug } from './lib/debug'
 import { corsMiddleware } from './middleware/cors'
 import { jwtAuth, addonAuth } from './middleware/auth'
 import { templates } from './routes/templates'
@@ -99,7 +100,7 @@ export default {
           userId: thread.user_id,
         })
       }
-      console.log(`Enqueued ${threadsToSync.length} threads for sync`)
+      debug(env, `Enqueued ${threadsToSync.length} threads for sync`)
     }
 
     if (event.cron === '* * * * *') {
@@ -111,7 +112,7 @@ export default {
           userId: fu.user_id,
         })
       }
-      console.log(`Enqueued ${dueFollowUps.length} follow-ups for draft creation`)
+      debug(env, `Enqueued ${dueFollowUps.length} follow-ups for draft creation`)
     }
   },
 }

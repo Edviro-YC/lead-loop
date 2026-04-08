@@ -76,17 +76,10 @@ followUps.delete('/:id', async (c) => {
   const supabase = c.get('supabase')
   const id = c.req.param('id')
 
-  // Cancelling a rule also dismisses pending follow-ups
-  await supabase
-    .from('scheduled_follow_ups')
-    .update({ status: 'dismissed' })
-    .eq('rule_id', id)
-    .eq('status', 'pending')
-
-  const { error } = await supabase
-    .from('follow_up_rules')
-    .update({ status: 'cancelled' })
-    .eq('id', id)
+  const [, { error }] = await Promise.all([
+    supabase.from('scheduled_follow_ups').update({ status: 'dismissed' }).eq('rule_id', id).eq('status', 'pending'),
+    supabase.from('follow_up_rules').update({ status: 'cancelled' }).eq('id', id),
+  ])
 
   if (error) return c.json({ error: error.message }, 500)
   return c.json({ success: true })

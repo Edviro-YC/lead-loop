@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
+import { debug } from '../lib/debug'
 import { enhanceDraft, suggestReply } from '../services/openai'
 import { findSimilarExamples, formatExamplesForPrompt } from '../services/retrieval'
 
@@ -11,6 +12,7 @@ const addon = new Hono<AppEnv>()
  * we return relevant templates, lead info, and thread status.
  */
 addon.post('/context', async (c) => {
+  const t0 = Date.now()
   const supabase = c.get('supabase')
   const userId = c.get('userId')
   const { gmail_thread_id, to_email } = await c.req.json<{
@@ -18,67 +20,69 @@ addon.post('/context', async (c) => {
     to_email?: string
   }>()
 
-  const result: Record<string, unknown> = {}
+  const t1 = Date.now()
+  const [threadResult, leadResult, templatesResult] = await Promise.all([
+    gmail_thread_id
+      ? supabase.from('watched_threads').select('id, status, lead_id').eq('user_id', userId).eq('gmail_thread_id', gmail_thread_id).single()
+      : Promise.resolve({ data: null }),
+    to_email
+      ? supabase.from('leads').select('id, name, company, title, status').eq('user_id', userId).eq('email', to_email).single()
+      : Promise.resolve({ data: null }),
+    supabase.from('templates').select('id, name, category').eq('user_id', userId).eq('is_active', true).order('name'),
+  ])
+  debug(c.env, `[timing] /context parallel queries: ${Date.now() - t1}ms`)
 
-  // Check if this thread is already watched
-  if (gmail_thread_id) {
-    const { data: thread } = await supabase
-      .from('watched_threads')
-      .select('id, status, lead_id')
-      .eq('user_id', userId)
-      .eq('gmail_thread_id', gmail_thread_id)
-      .single()
-    result.watched_thread = thread
-  }
-
-  // Look up lead by recipient email
-  if (to_email) {
-    const { data: lead } = await supabase
-      .from('leads')
-      .select('id, name, company, title, status')
-      .eq('user_id', userId)
-      .eq('email', to_email)
-      .single()
-    result.lead = lead
-  }
-
-  // Fetch active templates for quick-insert
-  const { data: templates } = await supabase
-    .from('templates')
-    .select('id, name, category')
-    .eq('user_id', userId)
-    .eq('is_active', true)
-    .order('name')
-
-  result.templates = templates
-
-  return c.json(result)
+  debug(c.env, `[timing] /context total: ${Date.now() - t0}ms`)
+  return c.json({
+    watched_thread: threadResult.data,
+    lead: leadResult.data,
+    templates: templatesResult.data,
+  })
 })
 
 addon.post('/insert-template', async (c) => {
+  const t0 = Date.now()
   const supabase = c.get('supabase')
-  const { template_id, context } = await c.req.json<{
+  const userId = c.get('userId')
+  const { template_id, to_email } = await c.req.json<{
     template_id: string
-    context: Record<string, string>
+    to_email?: string
+    context?: Record<string, string>
   }>()
 
-  const { data: template, error } = await supabase
-    .from('templates')
-    .select('subject, body')
-    .eq('id', template_id)
-    .single()
+  const t1 = Date.now()
+  const [templateResult, leadResult] = await Promise.all([
+    supabase.from('templates').select('subject, body').eq('id', template_id).single(),
+    to_email
+      ? supabase.from('leads').select('name, company, title').eq('user_id', userId).eq('email', to_email).single()
+      : Promise.resolve({ data: null }),
+  ])
+  debug(c.env, `[timing] /insert-template parallel fetch: ${Date.now() - t1}ms`)
 
-  if (error || !template) return c.json({ error: 'Template not found' }, 404)
+  const template = templateResult.data
+  if (templateResult.error || !template) return c.json({ error: 'Template not found' }, 404)
+
+  const lead = leadResult.data as { name?: string; company?: string; title?: string } | null
+  const vars: Record<string, string> = {}
+  if (lead) {
+    vars.first_name = (lead.name ?? '').split(' ')[0]
+    vars.name = lead.name ?? ''
+    vars.company = lead.company ?? ''
+    vars.title = lead.title ?? ''
+  }
+  if (to_email) vars.email = to_email
 
   let rendered = template.body
   let renderedSubject = template.subject || ''
-  for (const [key, value] of Object.entries(context)) {
+  for (const [key, value] of Object.entries(vars)) {
     const placeholder = `{{${key}}}`
     rendered = rendered.replaceAll(placeholder, value)
     renderedSubject = renderedSubject.replaceAll(placeholder, value)
   }
 
-  return c.json({ subject: renderedSubject, body: rendered })
+  const htmlBody = rendered.replace(/\n/g, '<br>')
+  debug(c.env, `[timing] /insert-template total: ${Date.now() - t0}ms`)
+  return c.json({ subject: renderedSubject, body: htmlBody })
 })
 
 addon.post('/enhance', async (c) => {
@@ -100,7 +104,6 @@ addon.post('/suggest-reply', async (c) => {
   const userId = c.get('userId')
   const { gmail_thread_id } = await c.req.json<{ gmail_thread_id: string }>()
 
-  // Find internal thread record, or fetch from Gmail if not watched
   const { data: thread } = await supabase
     .from('watched_threads')
     .select('id')
@@ -109,28 +112,36 @@ addon.post('/suggest-reply', async (c) => {
     .single()
 
   if (!thread) {
-    // Thread not watched -- return a basic suggestion without stored context
     return c.json({
       suggestion: null,
-      message: 'Watch this thread first for contextual suggestions',
+      message: 'Add this thread to LeadLoop first for contextual suggestions',
     })
   }
 
-  const { data: messages } = await supabase
-    .from('thread_messages')
-    .select('direction, from_email, body_text, sent_at')
-    .eq('thread_id', thread.id)
-    .order('sent_at', { ascending: true })
+  const [{ data: messages }, { count: exampleCount }] = await Promise.all([
+    supabase
+      .from('thread_messages')
+      .select('direction, from_email, body_text, sent_at')
+      .eq('thread_id', thread.id)
+      .order('sent_at', { ascending: true }),
+    supabase
+      .from('outreach_examples')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId),
+  ])
 
   if (!messages?.length) {
     return c.json({ suggestion: null, message: 'No synced messages yet' })
   }
 
-  const threadContext = messages.map((m) => m.body_text ?? '').join('\n')
-  const retrieved = await findSimilarExamples(
-    supabase, c.env.OPENAI_API_KEY, userId, threadContext
-  )
-  const examples = formatExamplesForPrompt(retrieved)
+  let examples: string[] = []
+  if (exampleCount && exampleCount > 0) {
+    const threadContext = messages.map((m) => m.body_text ?? '').join('\n')
+    const retrieved = await findSimilarExamples(
+      supabase, c.env.OPENAI_API_KEY, userId, threadContext
+    )
+    examples = formatExamplesForPrompt(retrieved)
+  }
 
   const suggestion = await suggestReply(c.env.OPENAI_API_KEY, {
     threadMessages: messages,
@@ -161,7 +172,7 @@ addon.post('/watch', async (c) => {
 
   await c.env.THREAD_SYNC_QUEUE.send({ threadId: data.id, userId })
 
-  return c.json({ thread: data, message: 'Thread is now being watched' })
+  return c.json({ thread: data, message: 'Thread added to LeadLoop' })
 })
 
 addon.post('/set-followup', async (c) => {
@@ -181,7 +192,7 @@ addon.post('/set-followup', async (c) => {
     .eq('gmail_thread_id', gmail_thread_id)
     .single()
 
-  if (!thread) return c.json({ error: 'Thread must be watched first' }, 400)
+  if (!thread) return c.json({ error: 'Add this thread to LeadLoop first' }, 400)
 
   const days = delay_days ?? 3
 

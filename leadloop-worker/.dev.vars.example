@@ -1,0 +1,11 @@
+# Copy this file to .dev.vars and fill in your values.
+# These are used by `wrangler dev` for local development.
+
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+OPENAI_API_KEY=sk-...
+GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
+ADDON_API_KEY=generate-a-random-string
+
+# Optional: enable verbose timing/debug logs (default: off)
+# DEBUG=true

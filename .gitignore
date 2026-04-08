@@ -10,3 +10,9 @@ dist/
 .DS_Store
 Thumbs.db
 .turbo/
+
+# Apps Script project config (contains your personal script ID)
+.clasp.json
+
+# Supabase local dev artifacts
+supabase/.temp/

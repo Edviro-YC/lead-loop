@@ -90,20 +90,11 @@ examples.post('/from-thread/:threadId', async (c) => {
     tags?: string[]
   }>()
 
-  // Pull the thread and its messages to build an example
-  const { data: thread } = await supabase
-    .from('watched_threads')
-    .select('subject')
-    .eq('id', threadId)
-    .single()
-
-  const { data: messages } = await supabase
-    .from('thread_messages')
-    .select('direction, body_text, sent_at')
-    .eq('thread_id', threadId)
-    .eq('direction', 'sent')
-    .order('sent_at', { ascending: true })
-    .limit(1)
+  const [{ data: thread }, { data: messages }] = await Promise.all([
+    supabase.from('watched_threads').select('subject').eq('id', threadId).single(),
+    supabase.from('thread_messages').select('direction, body_text, sent_at')
+      .eq('thread_id', threadId).eq('direction', 'sent').order('sent_at', { ascending: true }).limit(1),
+  ])
 
   if (!messages?.length) {
     return c.json({ error: 'No sent messages found in this thread' }, 404)

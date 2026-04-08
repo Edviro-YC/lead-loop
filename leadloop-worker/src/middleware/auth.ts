@@ -1,6 +1,10 @@
 import { createMiddleware } from 'hono/factory'
 import type { AppEnv } from '../lib/types'
 import { createUserClient, createServiceClient } from '../lib/supabase'
+import { debug } from '../lib/debug'
+
+const profileCache = new Map<string, { userId: string; expiresAt: number }>()
+const CACHE_TTL_MS = 5 * 60 * 1000
 
 /**
  * JWT auth middleware for dashboard requests.
@@ -32,6 +36,7 @@ export const jwtAuth = createMiddleware<AppEnv>(async (c, next) => {
  * We validate the key and look up the user by email.
  */
 export const addonAuth = createMiddleware<AppEnv>(async (c, next) => {
+  const t0 = Date.now()
   const apiKey = c.req.header('X-Addon-Key')
   const userEmail = c.req.header('X-User-Email')
 
@@ -43,6 +48,16 @@ export const addonAuth = createMiddleware<AppEnv>(async (c, next) => {
     return c.json({ error: 'Invalid add-on API key' }, 403)
   }
 
+  const cached = profileCache.get(userEmail)
+  if (cached && cached.expiresAt > Date.now()) {
+    debug(c.env, `[timing] addonAuth cache hit: ${Date.now() - t0}ms`)
+    const admin = createServiceClient(c.env)
+    c.set('userId', cached.userId)
+    c.set('supabase', admin)
+    await next()
+    return
+  }
+
   const admin = createServiceClient(c.env)
   const { data: profile, error } = await admin
     .from('profiles')
@@ -50,12 +65,17 @@ export const addonAuth = createMiddleware<AppEnv>(async (c, next) => {
     .eq('gmail_email', userEmail)
     .single()
 
+  debug(c.env, `[timing] addonAuth profile lookup: ${Date.now() - t0}ms`)
+
   if (error || !profile) {
     return c.json({ error: 'User not found' }, 404)
   }
 
-  // For add-on requests, create a service client (bypasses RLS)
-  // since we've already validated identity via API key + email lookup
+  profileCache.set(userEmail, {
+    userId: profile.id,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  })
+
   c.set('userId', profile.id)
   c.set('supabase', admin)
   await next()
