@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { AppBindings, AppEnv, ThreadSyncMessage, FollowUpDraftMessage, EmbedExampleMessage } from './lib/types'
+import type { AppBindings, AppEnv, FollowUpDraftMessage, EmbedExampleMessage } from './lib/types'
 import { createServiceClient } from './lib/supabase'
 import { debug } from './lib/debug'
 import { corsMiddleware } from './middleware/cors'
@@ -11,10 +11,9 @@ import { followUps } from './routes/follow-ups'
 import { ai } from './routes/ai'
 import { examples } from './routes/examples'
 import { addon } from './routes/addon'
-import { syncThread } from './jobs/thread-sync'
 import { processFollowUpDraft } from './jobs/follow-up-draft'
 import { embedOutreachExample } from './jobs/embed-example'
-import { getThreadsToSync, getDueFollowUps } from './services/scheduling'
+import { getDueFollowUps } from './services/scheduling'
 
 const app = new Hono<AppEnv>()
 
@@ -47,11 +46,10 @@ export default {
   fetch: app.fetch,
 
   /**
-   * Queue consumer: dispatches messages to the appropriate job handler
-   * based on which queue the batch came from.
+   * Queue consumer: dispatches messages to the appropriate job handler.
    */
   async queue(
-    batch: MessageBatch<ThreadSyncMessage | FollowUpDraftMessage | EmbedExampleMessage>,
+    batch: MessageBatch<FollowUpDraftMessage | EmbedExampleMessage>,
     env: AppBindings,
     _ctx: ExecutionContext
   ): Promise<void> {
@@ -61,9 +59,7 @@ export default {
       try {
         const payload = message.body
 
-        if ('threadId' in payload && 'userId' in payload) {
-          await syncThread(supabase, env, payload as ThreadSyncMessage)
-        } else if ('scheduledFollowUpId' in payload) {
+        if ('scheduledFollowUpId' in payload) {
           await processFollowUpDraft(supabase, env, payload as FollowUpDraftMessage)
         } else if ('exampleId' in payload) {
           await embedOutreachExample(supabase, env.OPENAI_API_KEY, payload as EmbedExampleMessage)
@@ -80,39 +76,23 @@ export default {
   },
 
   /**
-   * Cron trigger handler.
-   * - Every 5 min: enqueue watched threads that need syncing
-   * - Every 1 min: enqueue due follow-ups for draft creation
+   * Cron trigger: every 10 min, enqueue due follow-ups for draft creation.
    */
   async scheduled(
-    event: ScheduledEvent,
+    _event: ScheduledEvent,
     env: AppBindings,
-    ctx: ExecutionContext
+    _ctx: ExecutionContext
   ): Promise<void> {
     const supabase = createServiceClient(env)
+    const dueFollowUps = await getDueFollowUps(supabase)
 
-    if (event.cron === '*/5 * * * *') {
-      // Sync watched threads
-      const threadsToSync = await getThreadsToSync(supabase)
-      for (const thread of threadsToSync) {
-        await env.THREAD_SYNC_QUEUE.send({
-          threadId: thread.id,
-          userId: thread.user_id,
-        })
-      }
-      debug(env, `Enqueued ${threadsToSync.length} threads for sync`)
+    for (const fu of dueFollowUps) {
+      await env.FOLLOW_UP_DRAFT_QUEUE.send({
+        scheduledFollowUpId: fu.id,
+        userId: fu.user_id,
+      })
     }
 
-    if (event.cron === '* * * * *') {
-      // Process due follow-ups
-      const dueFollowUps = await getDueFollowUps(supabase)
-      for (const fu of dueFollowUps) {
-        await env.FOLLOW_UP_DRAFT_QUEUE.send({
-          scheduledFollowUpId: fu.id,
-          userId: fu.user_id,
-        })
-      }
-      debug(env, `Enqueued ${dueFollowUps.length} follow-ups for draft creation`)
-    }
+    debug(env, `Enqueued ${dueFollowUps.length} follow-ups for draft creation`)
   },
 }

@@ -8,27 +8,16 @@
 	"upload_source_maps": true,
 	"placement": { "mode": "smart" },
 
-	// Set these to your own project values before deploying.
-	"vars": {
-		"SUPABASE_URL": "https://YOUR_PROJECT_REF.supabase.co",
-		"SUPABASE_ANON_KEY": "YOUR_SUPABASE_ANON_KEY",
-		"DASHBOARD_URL": "https://your-dashboard-url.vercel.app"
-	},
-	// Secrets (set via `wrangler secret put <NAME>`):
-	//   SUPABASE_SERVICE_ROLE_KEY  — Supabase service role key
-	//   OPENAI_API_KEY             — OpenAI API key
-	//   GOOGLE_CLIENT_ID           — Google OAuth client ID
-	//   GOOGLE_CLIENT_SECRET       — Google OAuth client secret
-	//   ADDON_API_KEY              — shared secret between add-on and worker
+	// All vars and secrets are set via .dev.vars (local) or
+	// Cloudflare dashboard > Settings > Variables and Secrets (production).
+	// See .dev.vars.example for the full list.
 
 	"queues": {
 		"producers": [
-			{ "binding": "THREAD_SYNC_QUEUE", "queue": "leadloop-thread-sync" },
 			{ "binding": "FOLLOW_UP_DRAFT_QUEUE", "queue": "leadloop-follow-up-draft" },
 			{ "binding": "EMBED_EXAMPLE_QUEUE", "queue": "leadloop-embed-example" }
 		],
 		"consumers": [
-			{ "queue": "leadloop-thread-sync", "max_batch_size": 10, "max_retries": 3 },
 			{ "queue": "leadloop-follow-up-draft", "max_batch_size": 5, "max_retries": 3 },
 			{ "queue": "leadloop-embed-example", "max_batch_size": 10, "max_retries": 3 }
 		]
@@ -36,8 +25,7 @@
 
 	"triggers": {
 		"crons": [
-			"*/5 * * * *",
-			"* * * * *"
+			"*/10 * * * *"
 		]
 	}
 }

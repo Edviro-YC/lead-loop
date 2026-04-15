@@ -24,7 +24,6 @@ export interface AppBindings {
   DEBUG?: string
 
   // Queue producer bindings
-  THREAD_SYNC_QUEUE: Queue
   FOLLOW_UP_DRAFT_QUEUE: Queue
   EMBED_EXAMPLE_QUEUE: Queue
 }
@@ -42,11 +41,6 @@ export type AppEnv = {
 export type AppContext = Context<AppEnv>
 
 // Queue message payload types
-export interface ThreadSyncMessage {
-  threadId: string
-  userId: string
-}
-
 export interface FollowUpDraftMessage {
   scheduledFollowUpId: string
   userId: string

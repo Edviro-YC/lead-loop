@@ -1,11 +1,16 @@
 # Copy this file to .dev.vars and fill in your values.
-# These are used by `wrangler dev` for local development.
+# These override wrangler.jsonc vars for local dev and wrangler deploy.
 
+SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+SUPABASE_ANON_KEY=your-supabase-anon-key
+DASHBOARD_URL=https://your-dashboard-url.vercel.app
+
+# Secrets
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
 OPENAI_API_KEY=sk-...
 GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-...
 ADDON_API_KEY=generate-a-random-string
 
-# Optional: enable verbose timing/debug logs (default: off)
+# Optional: enable verbose timing/debug logs
 # DEBUG=true

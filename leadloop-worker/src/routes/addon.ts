@@ -3,6 +3,7 @@ import type { AppEnv } from '../lib/types'
 import { debug } from '../lib/debug'
 import { enhanceDraft, suggestReply } from '../services/openai'
 import { findSimilarExamples, formatExamplesForPrompt } from '../services/retrieval'
+import { syncThreadFromGmail } from '../jobs/thread-sync'
 
 const addon = new Hono<AppEnv>()
 
@@ -104,12 +105,10 @@ addon.post('/suggest-reply', async (c) => {
   const userId = c.get('userId')
   const { gmail_thread_id } = await c.req.json<{ gmail_thread_id: string }>()
 
-  const { data: thread } = await supabase
-    .from('watched_threads')
-    .select('id')
-    .eq('user_id', userId)
-    .eq('gmail_thread_id', gmail_thread_id)
-    .single()
+  const [{ data: thread }, { data: profile }] = await Promise.all([
+    supabase.from('watched_threads').select('id, gmail_thread_id').eq('user_id', userId).eq('gmail_thread_id', gmail_thread_id).single(),
+    supabase.from('profiles').select('gmail_refresh_token, gmail_email').eq('id', userId).single(),
+  ])
 
   if (!thread) {
     return c.json({
@@ -117,6 +116,18 @@ addon.post('/suggest-reply', async (c) => {
       message: 'Add this thread to LeadLoop first for contextual suggestions',
     })
   }
+
+  if (!profile?.gmail_refresh_token) {
+    return c.json({ suggestion: null, message: 'Gmail credentials expired. Please re-authenticate in the dashboard.' })
+  }
+
+  await syncThreadFromGmail(supabase, c.env, {
+    threadId: thread.id,
+    gmailThreadId: thread.gmail_thread_id,
+    userId,
+    refreshToken: profile.gmail_refresh_token,
+    userEmail: profile.gmail_email ?? '',
+  })
 
   const [{ data: messages }, { count: exampleCount }] = await Promise.all([
     supabase
@@ -131,7 +142,7 @@ addon.post('/suggest-reply', async (c) => {
   ])
 
   if (!messages?.length) {
-    return c.json({ suggestion: null, message: 'No synced messages yet' })
+    return c.json({ suggestion: null, message: 'No messages found in this thread' })
   }
 
   let examples: string[] = []
@@ -170,7 +181,25 @@ addon.post('/watch', async (c) => {
 
   if (error) return c.json({ error: error.message }, 500)
 
-  await c.env.THREAD_SYNC_QUEUE.send({ threadId: data.id, userId })
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('gmail_refresh_token, gmail_email')
+    .eq('id', userId)
+    .single()
+
+  if (profile?.gmail_refresh_token) {
+    try {
+      await syncThreadFromGmail(supabase, c.env, {
+        threadId: data.id,
+        gmailThreadId: gmail_thread_id,
+        userId,
+        refreshToken: profile.gmail_refresh_token,
+        userEmail: profile.gmail_email ?? '',
+      })
+    } catch (err) {
+      debug(c.env, '[warn] Initial thread sync failed, will retry on next action:', err)
+    }
+  }
 
   return c.json({ thread: data, message: 'Thread added to LeadLoop' })
 })

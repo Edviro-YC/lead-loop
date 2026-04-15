@@ -1,31 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 /**
- * Find all active watched threads that need syncing (haven't been synced
- * in the last 4 minutes). Called by the 5-minute cron.
- */
-export async function getThreadsToSync(
-  supabase: SupabaseClient
-): Promise<Array<{ id: string; user_id: string }>> {
-  const fourMinAgo = new Date(Date.now() - 4 * 60 * 1000).toISOString()
-
-  const { data, error } = await supabase
-    .from('watched_threads')
-    .select('id, user_id')
-    .eq('status', 'active')
-    .or(`last_synced_at.is.null,last_synced_at.lt.${fourMinAgo}`)
-    .limit(100)
-
-  if (error) {
-    console.error('getThreadsToSync error:', error.message)
-    return []
-  }
-
-  return data ?? []
-}
-
-/**
- * Find all scheduled follow-ups that are due now. Called by the 1-minute cron.
+ * Find all scheduled follow-ups that are due now. Called by the cron.
  */
 export async function getDueFollowUps(
   supabase: SupabaseClient

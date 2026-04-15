@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
+import { debug } from '../lib/debug'
+import { syncThreadFromGmail } from '../jobs/thread-sync'
 
 const threads = new Hono<AppEnv>()
 
@@ -41,11 +43,25 @@ threads.post('/watch', async (c) => {
 
   if (error) return c.json({ error: error.message }, 500)
 
-  // Enqueue an immediate sync for this thread
-  await c.env.THREAD_SYNC_QUEUE.send({
-    threadId: data.id,
-    userId,
-  })
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('gmail_refresh_token, gmail_email')
+    .eq('id', userId)
+    .single()
+
+  if (profile?.gmail_refresh_token) {
+    try {
+      await syncThreadFromGmail(supabase, c.env, {
+        threadId: data.id,
+        gmailThreadId: gmail_thread_id,
+        userId,
+        refreshToken: profile.gmail_refresh_token,
+        userEmail: profile.gmail_email ?? '',
+      })
+    } catch (err) {
+      debug(c.env, '[warn] Initial thread sync failed:', err)
+    }
+  }
 
   return c.json({ thread: data }, 201)
 })
@@ -84,11 +100,27 @@ threads.get('/:id/messages', async (c) => {
 })
 
 threads.post('/:id/sync', async (c) => {
+  const supabase = c.get('supabase')
   const userId = c.get('userId')
   const id = c.req.param('id')
 
-  await c.env.THREAD_SYNC_QUEUE.send({ threadId: id, userId })
-  return c.json({ queued: true })
+  const [{ data: thread }, { data: profile }] = await Promise.all([
+    supabase.from('watched_threads').select('gmail_thread_id').eq('id', id).single(),
+    supabase.from('profiles').select('gmail_refresh_token, gmail_email').eq('id', userId).single(),
+  ])
+
+  if (!thread) return c.json({ error: 'Thread not found' }, 404)
+  if (!profile?.gmail_refresh_token) return c.json({ error: 'Gmail credentials expired' }, 400)
+
+  await syncThreadFromGmail(supabase, c.env, {
+    threadId: id,
+    gmailThreadId: thread.gmail_thread_id,
+    userId,
+    refreshToken: profile.gmail_refresh_token,
+    userEmail: profile.gmail_email ?? '',
+  })
+
+  return c.json({ synced: true })
 })
 
 export { threads }

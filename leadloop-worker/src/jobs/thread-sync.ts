@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { ThreadSyncMessage } from '../lib/types'
 import {
   getThread,
   extractBody,
@@ -14,40 +13,32 @@ interface SyncEnv {
 
 /**
  * Sync a watched thread's messages from Gmail into the database.
- * Called by the thread-sync queue consumer.
+ * Called on-demand before operations that need fresh thread data
+ * (suggest-reply, follow-up draft creation) and on initial watch.
  */
-export async function syncThread(
+export async function syncThreadFromGmail(
   supabase: SupabaseClient,
   env: SyncEnv,
-  msg: ThreadSyncMessage
+  opts: {
+    threadId: string
+    gmailThreadId: string
+    userId: string
+    refreshToken: string
+    userEmail: string
+  }
 ): Promise<void> {
-  const [{ data: thread }, { data: profile }] = await Promise.all([
-    supabase.from('watched_threads').select('gmail_thread_id, user_id').eq('id', msg.threadId).single(),
-    supabase.from('profiles').select('gmail_refresh_token, gmail_email').eq('id', msg.userId).single(),
-  ])
-
-  if (!thread) {
-    console.error(`Thread ${msg.threadId} not found`)
-    return
-  }
-
-  if (!profile?.gmail_refresh_token) {
-    console.error(`No Gmail credentials for user ${msg.userId}`)
-    return
-  }
-
   const { access_token } = await refreshAccessToken(
     env.GOOGLE_CLIENT_ID,
     env.GOOGLE_CLIENT_SECRET,
-    profile.gmail_refresh_token
+    opts.refreshToken
   )
 
   const gmailThread = await getThread(
     { accessToken: access_token },
-    thread.gmail_thread_id
+    opts.gmailThreadId
   )
 
-  const userEmail = profile.gmail_email?.toLowerCase() ?? ''
+  const normalizedEmail = opts.userEmail.toLowerCase()
 
   const rows = gmailThread.messages.map((gmailMsg) => {
     const from = getHeader(gmailMsg, 'From')
@@ -55,10 +46,10 @@ export async function syncThread(
     const subject = getHeader(gmailMsg, 'Subject')
     const bodyText = extractBody(gmailMsg)
     const sentAt = new Date(parseInt(gmailMsg.internalDate)).toISOString()
-    const direction = from.toLowerCase().includes(userEmail) ? 'sent' : 'received'
+    const direction = from.toLowerCase().includes(normalizedEmail) ? 'sent' : 'received'
 
     return {
-      thread_id: msg.threadId,
+      thread_id: opts.threadId,
       gmail_message_id: gmailMsg.id,
       direction,
       from_email: from,
@@ -82,5 +73,5 @@ export async function syncThread(
         ? new Date(parseInt(lastMessage.internalDate)).toISOString()
         : undefined,
     })
-    .eq('id', msg.threadId)
+    .eq('id', opts.threadId)
 }
