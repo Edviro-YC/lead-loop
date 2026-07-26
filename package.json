@@ -2,14 +2,29 @@
   "name": "leadloop",
   "version": "0.0.1",
   "private": true,
+  "workspaces": [
+    "apps/*",
+    "leadloop-worker",
+    "packages/*"
+  ],
   "scripts": {
-    "dev:dashboard": "pnpm --filter leadloop-dashboard dev",
-    "dev:worker": "pnpm --filter leadloop-worker dev",
-    "build:dashboard": "pnpm --filter leadloop-dashboard build",
-    "deploy:dashboard": "pnpm --filter leadloop-dashboard run deploy",
-    "preview:dashboard": "pnpm --filter leadloop-dashboard run preview",
-    "deploy:worker": "pnpm --filter leadloop-worker run deploy",
-    "lint": "pnpm --filter leadloop-dashboard lint",
-    "test": "pnpm --filter leadloop-worker test"
+    "dev:dashboard": "npm run dev -w leadloop-dashboard",
+    "dev:worker": "npm run dev -w leadloop-worker",
+    "build:dashboard": "npm run build -w leadloop-dashboard",
+    "deploy:dashboard": "npm run deploy -w leadloop-dashboard",
+    "preview:dashboard": "npm run preview -w leadloop-dashboard",
+    "deploy:worker": "npm run deploy -w leadloop-worker",
+    "lint": "npm run lint -w leadloop-dashboard",
+    "test": "npm run test -w leadloop-worker"
+  },
+  "allowScripts": {
+    "esbuild@0.25.4": true,
+    "esbuild@0.27.3": true,
+    "esbuild@0.28.1": true,
+    "sharp@0.34.5": true,
+    "sharp@0.35.2": true,
+    "unrs-resolver@1.12.2": true,
+    "workerd@1.20260310.1": true,
+    "workerd@1.20260722.1": true
   }
 }

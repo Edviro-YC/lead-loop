@@ -39,7 +39,7 @@ You'll need accounts (all have free tiers sufficient for personal use):
 - [Cloudflare](https://cloudflare.com) — API Worker + dashboard hosting, queues, cron
 - [OpenAI](https://platform.openai.com) — AI generation and embeddings
 - [Google Cloud Console](https://console.cloud.google.com) — OAuth client for Gmail
-- [Node.js](https://nodejs.org) 18+ and [pnpm](https://pnpm.io)
+- [Node.js](https://nodejs.org) 18+ (npm workspaces are used, no other package manager needed)
 
 ## Setup
 
@@ -48,7 +48,7 @@ You'll need accounts (all have free tiers sufficient for personal use):
 ```bash
 git clone https://github.com/YOUR_USERNAME/leadloop.git
 cd leadloop
-pnpm install
+npm install
 ```
 
 ### 2. Supabase
@@ -101,13 +101,13 @@ For local development, copy the example env file:
 ```bash
 cp .dev.vars.example .dev.vars
 # Fill in your values
-pnpm dev
+npm run dev
 ```
 
 Deploy:
 
 ```bash
-pnpm run deploy
+npm run deploy
 ```
 
 Note the Worker URL (e.g. `https://leadloop-worker.YOUR_SUBDOMAIN.workers.dev`).
@@ -139,7 +139,7 @@ The dashboard runs on Cloudflare Workers via the [OpenNext adapter](https://open
 Deploy:
 
 ```bash
-pnpm run deploy
+npm run deploy
 ```
 
 Note the dashboard URL (e.g. `https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.dev`). Set it as the `DASHBOARD_URL` variable on the API Worker (Cloudflare dashboard > leadloop-worker > Settings > Variables) so CORS allows the dashboard origin, and use it in the Supabase and Google OAuth settings from steps 2 and 4.
@@ -147,8 +147,8 @@ Note the dashboard URL (e.g. `https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.
 For local development:
 
 ```bash
-pnpm dev:dashboard   # Next.js dev server
-pnpm preview:dashboard   # build + preview in the Workers runtime
+npm run dev:dashboard   # Next.js dev server
+npm run preview:dashboard   # build + preview in the Workers runtime
 ```
 
 ### 6. Gmail Add-on
@@ -233,16 +233,16 @@ From the repo root:
 
 ```bash
 # Start the Worker locally
-pnpm dev:worker
+npm run dev:worker
 
 # Start the dashboard locally
-pnpm dev:dashboard
+npm run dev:dashboard
 
 # Deploy the Worker
-pnpm deploy:worker
+npm run deploy:worker
 
 # Deploy the dashboard
-pnpm deploy:dashboard
+npm run deploy:dashboard
 
 # Push add-on changes
 cd apps/gmail-addon && clasp push
