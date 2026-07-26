@@ -1,0 +1,12 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "leadloop-dashboard",
+	"main": ".open-next/worker.js",
+	"compatibility_date": "2026-07-26",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": { "enabled": true },
+	"assets": {
+		"directory": ".open-next/assets",
+		"binding": "ASSETS"
+	}
+}

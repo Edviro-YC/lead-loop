@@ -1,6 +1,8 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
+// TODO: Rename to proxy.ts once @opennextjs/cloudflare supports Next 16's
+// proxy convention (currently errors: "Node.js middleware is not supported").
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 

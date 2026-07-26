@@ -1,5 +1,7 @@
 node_modules/
+.pnpm-store/
 .next/
+.open-next/
 dist/
 .wrangler/
 .dev.vars

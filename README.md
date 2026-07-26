@@ -21,14 +21,14 @@ Gmail Add-on (Apps Script)  ←→  Cloudflare Worker (API)  ←→  Supabase (D
                                         ↓
                                    OpenAI (AI)
                                         ↓
-Dashboard (Next.js on Vercel)  ←→  Cloudflare Worker
+Dashboard (Next.js on Cloudflare Workers)  ←→  Cloudflare Worker
 ```
 
 | Component | Tech | Purpose |
 |-----------|------|---------|
 | `apps/gmail-addon/` | Google Apps Script | Thin Gmail sidebar UI |
 | `leadloop-worker/` | Cloudflare Workers + Hono | API, business logic, queue consumers, cron jobs |
-| `apps/leadloop-dashboard/` | Next.js 16, React 19, Tailwind | Management dashboard |
+| `apps/leadloop-dashboard/` | Next.js 16, React 19, Tailwind (on Cloudflare Workers via OpenNext) | Management dashboard |
 | `supabase/migrations/` | PostgreSQL + pgvector | Database schema, RLS policies, vector search |
 
 ## Prerequisites
@@ -36,8 +36,7 @@ Dashboard (Next.js on Vercel)  ←→  Cloudflare Worker
 You'll need accounts (all have free tiers sufficient for personal use):
 
 - [Supabase](https://supabase.com) — database and auth
-- [Cloudflare](https://cloudflare.com) — Worker hosting, queues, cron
-- [Vercel](https://vercel.com) — dashboard hosting
+- [Cloudflare](https://cloudflare.com) — API Worker + dashboard hosting, queues, cron
 - [OpenAI](https://platform.openai.com) — AI generation and embeddings
 - [Google Cloud Console](https://console.cloud.google.com) — OAuth client for Gmail
 - [Node.js](https://nodejs.org) 18+ and [pnpm](https://pnpm.io)
@@ -71,8 +70,8 @@ In the Supabase dashboard:
 2. Enter your Google OAuth client ID and secret (see step 4 below).
 3. Copy the callback URL Supabase gives you — you'll need it for Google Cloud Console.
 4. Go to **Authentication > URL Configuration**:
-   - Set **Site URL** to your dashboard URL (e.g. `https://your-app.vercel.app`)
-   - Add `https://your-app.vercel.app/auth/callback` to **Redirect URLs**
+   - Set **Site URL** to your dashboard URL (e.g. `https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.dev`)
+   - Add `https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.dev/auth/callback` to **Redirect URLs**
    - For local dev, also add `http://localhost:3000/auth/callback`
 
 Note down your **Project URL**, **anon key**, and **service role key** from **Settings > API**.
@@ -108,7 +107,7 @@ pnpm dev
 Deploy:
 
 ```bash
-pnpm deploy
+pnpm run deploy
 ```
 
 Note the Worker URL (e.g. `https://leadloop-worker.YOUR_SUBDOMAIN.workers.dev`).
@@ -122,7 +121,7 @@ Note the Worker URL (e.g. `https://leadloop-worker.YOUR_SUBDOMAIN.workers.dev`).
    - `https://www.googleapis.com/auth/gmail.modify`
 3. Go to **APIs & Services > Credentials** and create an **OAuth 2.0 Client ID** (Web application).
 4. Under **Authorized redirect URIs**, add the Supabase callback URL from step 2.
-5. Under **Authorized JavaScript origins**, add your dashboard URL (e.g. `https://your-app.vercel.app`).
+5. Under **Authorized JavaScript origins**, add your dashboard URL (e.g. `https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.dev`).
 6. Copy the **Client ID** and **Client Secret** — these go into both Supabase (step 2) and the Worker secrets (step 3).
 
 If your OAuth app is in **Testing** mode, add your email as a test user.
@@ -135,17 +134,21 @@ cp .env.local.example .env.local
 # Fill in your Supabase URL, anon key, and Worker URL
 ```
 
-Deploy to Vercel:
+The dashboard runs on Cloudflare Workers via the [OpenNext adapter](https://opennext.js.org/cloudflare). The `NEXT_PUBLIC_*` variables are inlined at build time from `.env.local`, so make sure they're filled in before deploying.
 
-1. Import the repo in Vercel.
-2. Set **Root Directory** to `apps/leadloop-dashboard`.
-3. Set the environment variables from `.env.local`.
-4. Deploy.
+Deploy:
+
+```bash
+pnpm run deploy
+```
+
+Note the dashboard URL (e.g. `https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.dev`). Set it as the `DASHBOARD_URL` variable on the API Worker (Cloudflare dashboard > leadloop-worker > Settings > Variables) so CORS allows the dashboard origin, and use it in the Supabase and Google OAuth settings from steps 2 and 4.
 
 For local development:
 
 ```bash
-pnpm dev:dashboard
+pnpm dev:dashboard   # Next.js dev server
+pnpm preview:dashboard   # build + preview in the Workers runtime
 ```
 
 ### 6. Gmail Add-on
@@ -237,6 +240,9 @@ pnpm dev:dashboard
 
 # Deploy the Worker
 pnpm deploy:worker
+
+# Deploy the dashboard
+pnpm deploy:dashboard
 
 # Push add-on changes
 cd apps/gmail-addon && clasp push
