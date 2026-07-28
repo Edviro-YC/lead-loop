@@ -10,6 +10,7 @@ LeadLoop helps you write better outreach emails and follow up consistently — w
 - **Enhance drafts** with AI-powered rewrites
 - **Suggest replies** based on thread context and your past successful outreach
 - **Track threads** and schedule follow-up reminders
+- **Run sequences** — assign a thread to an ordered arc of example emails and each follow-up draft picks up at the next step
 - **Manage leads, templates, and workflows** from a dashboard
 
 Everything happens inside Gmail. LeadLoop never sends emails on your behalf.
@@ -188,7 +189,7 @@ Configure the add-on:
 
 - **Templates** — Create reusable email templates with `{{name}}`, `{{company}}`, etc. placeholders.
 - **Leads** — Add contacts manually or import them. Leads are auto-matched when you compose to their email.
-- **Threads** — View all threads you've added to LeadLoop and their sync status.
+- **Threads** — View all threads you've added to LeadLoop and their sync status. Open a thread to schedule a follow-up, assign a sequence, or save it as an example/sequence.
 - **Follow-ups** — See scheduled follow-up reminders and manage rules.
 - **Examples** — Curate successful outreach examples for AI-powered reply suggestions. Group them into **sequences** (ordered multi-touch arcs: cold email → bump → breakup); assign a thread to a sequence and follow-up drafts are personalized around the current step's example. "Save as Sequence" on a thread captures every sent message as ordered steps.
 - **Settings** — Copy your add-on API key.
@@ -206,7 +207,7 @@ When composing:
 
 ### MCP server (AI agents)
 
-**Live now:** `https://leadloop-worker.tanujsiripurapu.workers.dev/mcp` — deployed, tested, waiting on one secret. Agents (Cursor, Claude, etc.) can read and write your templates, outreach examples, and watched threads. Data stays in Supabase.
+**Live now:** `https://leadloop-worker.tanujsiripurapu.workers.dev/mcp` — Agents (Cursor, Claude, etc.) can read and write your templates, outreach examples, sequences, watched threads, and follow-ups. Data stays in Supabase.
 
 Connect an agent (~3 minutes):
 
@@ -308,8 +309,8 @@ cd apps/gmail-addon && clasp push
 1. **Auth**: Users sign in with Google via Supabase Auth. The OAuth flow captures a Gmail refresh token, enabling the Worker to fetch emails on their behalf.
 2. **Gmail Add-on**: A thin Apps Script client that renders Cards in the Gmail sidebar. All business logic lives in the Worker — the add-on just makes API calls.
 3. **Thread tracking**: When you "Add to LeadLoop", the Worker queues a sync job that fetches the full thread from Gmail and stores messages in Supabase.
-4. **Follow-ups**: A cron job checks every minute for due follow-ups and queues draft creation. The Worker creates a Gmail draft (never sends) so you can review and send manually.
-5. **AI suggestions**: Reply suggestions use thread context + similar outreach examples (pgvector cosine similarity) to generate contextual responses via OpenAI. Threads assigned to a sequence get follow-up drafts modeled on the sequence's current step example (personalized, never copied); the step advances each time a draft is created, and an exhausted sequence dismisses the follow-up instead of silently drafting generic content.
+4. **Follow-ups**: Schedule from the Gmail add-on, the dashboard thread view, or via MCP (`schedule_follow_up`) — all three go through one shared code path, and a thread only ever has one pending follow-up. A cron job checks every 10 minutes for due follow-ups and queues draft creation. The Worker creates a Gmail draft (never sends) so you can review and send manually, then schedules the next one on the rule's cadence. There is no draft cap — a rule runs until the thread gets a reply, its sequence ends, or you cancel it.
+5. **AI suggestions**: Reply suggestions use thread context + similar outreach examples (pgvector cosine similarity) to generate contextual responses via OpenAI. Threads assigned to a sequence get follow-up drafts modeled on the current step's example — the prompt carries the entire sequence with the current step marked, so drafts stay close to the example (personalized, never copied) and end by proposing a brief pilot chat on a concrete day two days out (weekends roll to Monday). The step advances each time a draft is created, and an exhausted sequence dismisses the follow-up instead of silently drafting generic content.
 6. **Security**: All tables use Row Level Security. The add-on authenticates via a shared API key + user email header. The dashboard uses Supabase JWT auth. The MCP endpoint uses its own bearer API key + user email header, and every tool query is scoped to that user.
 
 ## License
