@@ -26,5 +26,11 @@
     "unrs-resolver@1.12.2": true,
     "workerd@1.20260310.1": true,
     "workerd@1.20260722.1": true
+  },
+  "dependencies": {
+    "html-to-text": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4"
   }
 }

@@ -19,6 +19,7 @@ export interface AppBindings {
   GOOGLE_CLIENT_ID: string
   GOOGLE_CLIENT_SECRET: string
   ADDON_API_KEY: string
+  MCP_API_KEY: string
 
   // Optional
   DEBUG?: string

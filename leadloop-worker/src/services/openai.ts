@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import type { SequenceDraftContext } from './retrieval'
 
 interface EnhanceParams {
   draftText: string
@@ -6,7 +7,7 @@ interface EnhanceParams {
   intent?: string
 }
 
-interface SuggestReplyParams {
+export interface SuggestReplyParams {
   threadMessages: Array<{
     direction: string
     from_email: string | null
@@ -16,6 +17,8 @@ interface SuggestReplyParams {
   examples: string[]
   baseText?: string
   isFollowUp?: boolean
+  /** Only used with isFollowUp; callers pass either baseText or sequence, not both. */
+  sequence?: SequenceDraftContext
 }
 
 export async function enhanceDraft(
@@ -31,8 +34,7 @@ export async function enhanceDraft(
     : ''
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    temperature: 0.7,
+    model: 'gpt-5.6-sol',
     messages: [
       {
         role: 'system',
@@ -55,12 +57,27 @@ export async function enhanceDraft(
   return response.choices[0]?.message?.content ?? params.draftText
 }
 
-export async function suggestReply(
-  apiKey: string,
-  params: SuggestReplyParams
-): Promise<string> {
-  const client = new OpenAI({ apiKey })
+/**
+ * The concrete day proposed in a sequence draft's closing ask: two days
+ * from now, rolled forward past weekends. Weekday computed in the user's
+ * timezone (single-tenant: Pacific).
+ */
+function pilotAskDay(): string {
+  const d = new Date()
+  d.setDate(d.getDate() + 2)
+  const weekday = () =>
+    new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'America/Los_Angeles' }).format(d)
+  while (weekday() === 'Saturday' || weekday() === 'Sunday') d.setDate(d.getDate() + 1)
+  return weekday()
+}
 
+/**
+ * Build the exact messages sent to OpenAI for a reply/follow-up suggestion.
+ * Exposed so drafts can be previewed and prompt-engineered.
+ */
+export function buildSuggestReplyPrompt(
+  params: SuggestReplyParams
+): { system: string; user: string } {
   const threadContext = params.threadMessages
     .map((m) => {
       const label = m.direction === 'sent' ? 'You' : m.from_email ?? 'Them'
@@ -72,12 +89,41 @@ export async function suggestReply(
     ? `\nHere are examples of successful outreach for reference:\n${params.examples.join('\n---\n')}\n`
     : ''
 
+  const seq = params.sequence
+  const sequenceBlock = seq
+    ? [
+        `This thread follows the outreach sequence "${seq.name}"${seq.description ? ` — ${seq.description}` : ''}.`,
+        `You are drafting step ${seq.currentStep} of ${seq.totalSteps}. The full sequence:`,
+        ...seq.steps.map((s) =>
+          [
+            `--- Step ${s.step_number}${s.step_number === seq.currentStep ? ' (THE STEP YOU ARE DRAFTING)' : ''}`,
+            `Context: ${s.context}`,
+            s.subject ? `Subject: ${s.subject}` : '',
+            `Body:\n${s.body}`,
+          ]
+            .filter(Boolean)
+            .join('\n')
+        ),
+        `---`,
+        `Draft this email by staying close to the step ${seq.currentStep} example: keep its structure, tone, and approximate length, and reuse its phrasing wherever it fits. Change only what personalization requires — the recipient's name, district-specific details, and a natural fit with the thread. Do not add claims or offers that are not in the example.`,
+        `End the email with this closing ask, lightly adapted so it reads naturally against this step's topic — always keep the day, the brief chat, and the pilot: "Are you free on ${pilotAskDay()} for a brief chat to discuss a potential pilot to resolve this?"`,
+        `The other steps are context: earlier steps show what the recipient has already received; later steps show what is still coming, so do not preempt or repeat their content.`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : ''
+
   const systemPrompt = params.isFollowUp
     ? [
         'You are writing a follow-up email in an ongoing outreach thread.',
         'The recipient has not replied yet.',
-        'Be brief, add new value or a different angle, and include a clear ask.',
+        // A sequence step already defines the angle; the generic "new angle"
+        // instruction would push the model to invent instead.
+        seq
+          ? 'The sequence step example below supplies the angle and the value-add for this email.'
+          : 'Be brief, add new value or a different angle, and include a clear ask.',
         'Do not repeat the previous email. Do not be pushy.',
+        sequenceBlock,
         params.baseText
           ? `Use this template as a starting point:\n${params.baseText}`
           : '',
@@ -96,12 +142,21 @@ export async function suggestReply(
         .filter(Boolean)
         .join('\n')
 
+  return { system: systemPrompt, user: `Thread so far:\n\n${threadContext}` }
+}
+
+export async function suggestReply(
+  apiKey: string,
+  params: SuggestReplyParams
+): Promise<string> {
+  const client = new OpenAI({ apiKey })
+  const prompt = buildSuggestReplyPrompt(params)
+
   const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    temperature: 0.7,
+    model: 'gpt-5.6-sol',
     messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Thread so far:\n\n${threadContext}` },
+      { role: 'system', content: prompt.system },
+      { role: 'user', content: prompt.user },
     ],
   })
 

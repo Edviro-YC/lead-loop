@@ -1,15 +1,18 @@
 import { Hono } from 'hono'
+import { StreamableHTTPTransport } from '@hono/mcp'
 import type { AppBindings, AppEnv, FollowUpDraftMessage, EmbedExampleMessage } from './lib/types'
 import { createServiceClient } from './lib/supabase'
 import { debug } from './lib/debug'
 import { corsMiddleware } from './middleware/cors'
-import { jwtAuth, addonAuth } from './middleware/auth'
+import { jwtAuth, addonAuth, mcpAuth } from './middleware/auth'
+import { buildMcpServer } from './mcp/server'
 import { templates } from './routes/templates'
 import { leads } from './routes/leads'
 import { threads } from './routes/threads'
 import { followUps } from './routes/follow-ups'
 import { ai } from './routes/ai'
 import { examples } from './routes/examples'
+import { sequences } from './routes/sequences'
 import { addon } from './routes/addon'
 import { processFollowUpDraft } from './jobs/follow-up-draft'
 import { embedOutreachExample } from './jobs/embed-example'
@@ -32,6 +35,7 @@ api.route('/threads', threads)
 api.route('/follow-ups', followUps)
 api.route('/ai', ai)
 api.route('/examples', examples)
+api.route('/sequences', sequences)
 app.route('/api', api)
 
 // Gmail add-on routes (API key auth)
@@ -39,6 +43,22 @@ const addonRoutes = new Hono<AppEnv>()
 addonRoutes.use('*', addonAuth)
 addonRoutes.route('/', addon)
 app.route('/addon', addonRoutes)
+
+// MCP endpoint (API key auth) — stateless Streamable HTTP, one server per request
+const mcpRoutes = new Hono<AppEnv>()
+mcpRoutes.use('*', mcpAuth)
+mcpRoutes.all('/', async (c) => {
+  const server = buildMcpServer({
+    supabase: c.get('supabase'),
+    env: c.env,
+    userId: c.get('userId'),
+  })
+  const transport = new StreamableHTTPTransport()
+  await server.connect(transport)
+  const response = await transport.handleRequest(c)
+  return response ?? c.body(null, 204)
+})
+app.route('/mcp', mcpRoutes)
 
 // ─── Worker exports ─────────────────────────────────────────────────────────
 

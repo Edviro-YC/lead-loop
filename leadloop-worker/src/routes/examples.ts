@@ -9,7 +9,7 @@ examples.get('/', async (c) => {
 
   const { data, error } = await supabase
     .from('outreach_examples')
-    .select('id, context, subject, body, outcome, tags, created_at')
+    .select('id, context, subject, body, outcome, tags, sequence_id, step_number, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
 
@@ -26,6 +26,8 @@ examples.post('/', async (c) => {
     body: string
     outcome?: string
     tags?: string[]
+    sequence_id?: string
+    step_number?: number
   }>()
 
   const { data, error } = await supabase
@@ -53,6 +55,8 @@ examples.put('/:id', async (c) => {
     body?: string
     outcome?: string
     tags?: string[]
+    sequence_id?: string | null
+    step_number?: number | null
   }>()
 
   const { data, error } = await supabase

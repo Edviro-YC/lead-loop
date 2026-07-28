@@ -1,53 +1,27 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
+import { createFollowUpSchedule } from '../services/scheduling'
 
 const followUps = new Hono<AppEnv>()
 
 followUps.post('/threads/:threadId/follow-up', async (c) => {
-  const supabase = c.get('supabase')
-  const userId = c.get('userId')
-  const threadId = c.req.param('threadId')
   const body = await c.req.json<{
     delay_days?: number
     condition?: string
     template_id?: string
-    max_follow_ups?: number
   }>()
 
-  // Create the follow-up rule
-  const { data: rule, error: ruleErr } = await supabase
-    .from('follow_up_rules')
-    .insert({
-      thread_id: threadId,
-      user_id: userId,
-      delay_days: body.delay_days ?? 3,
-      condition: body.condition ?? 'no_reply',
-      template_id: body.template_id ?? null,
-      max_follow_ups: body.max_follow_ups ?? 3,
-    })
-    .select()
-    .single()
-
-  if (ruleErr) return c.json({ error: ruleErr.message }, 500)
-
-  // Schedule the first follow-up
-  const scheduledFor = new Date()
-  scheduledFor.setDate(scheduledFor.getDate() + (body.delay_days ?? 3))
-
-  const { data: scheduled, error: schedErr } = await supabase
-    .from('scheduled_follow_ups')
-    .insert({
-      rule_id: rule.id,
-      thread_id: threadId,
-      user_id: userId,
-      scheduled_for: scheduledFor.toISOString(),
-    })
-    .select()
-    .single()
-
-  if (schedErr) return c.json({ error: schedErr.message }, 500)
-
-  return c.json({ rule, scheduled }, 201)
+  try {
+    const { rule, scheduled } = await createFollowUpSchedule(
+      c.get('supabase'),
+      c.get('userId'),
+      c.req.param('threadId'),
+      { delayDays: body.delay_days, condition: body.condition, templateId: body.template_id }
+    )
+    return c.json({ rule, scheduled }, 201)
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+  }
 })
 
 followUps.put('/:id', async (c) => {
@@ -57,7 +31,6 @@ followUps.put('/:id', async (c) => {
     delay_days?: number
     condition?: string
     template_id?: string | null
-    max_follow_ups?: number
     status?: string
   }>()
 

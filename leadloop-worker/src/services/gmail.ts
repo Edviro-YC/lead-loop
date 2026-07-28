@@ -1,3 +1,6 @@
+import { Buffer } from 'node:buffer'
+import { convert } from 'html-to-text'
+
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1'
 
 interface GmailTokens {
@@ -10,19 +13,19 @@ interface GmailThread {
   messages: GmailMessage[]
 }
 
+interface GmailPart {
+  mimeType?: string
+  body?: { data?: string }
+  parts?: GmailPart[]
+}
+
 interface GmailMessage {
   id: string
   threadId: string
   internalDate: string
   snippet: string
-  payload: {
+  payload: GmailPart & {
     headers: Array<{ name: string; value: string }>
-    body?: { data?: string }
-    parts?: Array<{
-      mimeType: string
-      body?: { data?: string }
-      parts?: Array<{ mimeType: string; body?: { data?: string } }>
-    }>
   }
 }
 
@@ -108,31 +111,65 @@ export async function createDraft(
 }
 
 /**
- * Extract plain-text body from a Gmail message payload.
+ * Extract a readable plain-text body from a Gmail message payload.
+ * Prefers text/plain, falls back to text/html converted to text.
+ * The snippet fallback only fires for messages with no text part at
+ * all (e.g. attachment-only) -- a data condition, not an error.
  */
 export function extractBody(message: GmailMessage): string {
-  // Try top-level body
-  if (message.payload.body?.data) {
-    return base64Decode(message.payload.body.data)
-  }
+  const plain = findPart(message.payload, 'text/plain')
+  if (plain) return stripQuotedReply(base64Decode(plain))
 
-  // Search parts for text/plain
-  const parts = message.payload.parts ?? []
-  for (const part of parts) {
-    if (part.mimeType === 'text/plain' && part.body?.data) {
-      return base64Decode(part.body.data)
-    }
-    // Nested multipart
-    if (part.parts) {
-      for (const nested of part.parts) {
-        if (nested.mimeType === 'text/plain' && nested.body?.data) {
-          return base64Decode(nested.body.data)
-        }
-      }
-    }
-  }
+  const html = findPart(message.payload, 'text/html')
+  if (html) return stripQuotedReply(htmlToText(base64Decode(html)))
 
-  return message.snippet
+  // Snippets are HTML-entity-escaped; htmlToText decodes them.
+  return htmlToText(message.snippet ?? '')
+}
+
+/** Depth-first search of a MIME tree for the first part with inline data of the given type. */
+function findPart(part: GmailPart, mimeType: string): string | undefined {
+  if (part.mimeType === mimeType && part.body?.data) return part.body.data
+  for (const child of part.parts ?? []) {
+    const data = findPart(child, mimeType)
+    if (data) return data
+  }
+  return undefined
+}
+
+function htmlToText(html: string): string {
+  return convert(html, {
+    wordwrap: false,
+    selectors: [
+      { selector: 'img', format: 'skip' },
+      { selector: 'a', options: { ignoreHref: true } },
+    ],
+  }).trim()
+}
+
+// ponytail: regex markers cover Gmail/Apple Mail/Outlook quote headers;
+// swap in the email-reply-parser package if other clients/locales bite.
+const QUOTE_MARKERS = [
+  /^On [\s\S]{0,300}? wrote:\s*$/m, // Gmail/Apple Mail attribution, may wrap across lines
+  /^-{2,}\s*Original Message\s*-{2,}/im, // Outlook
+  /^_{8,}\s*$/m, // Outlook divider
+  /^(?:>[^\n]*(?:\n|$))+/m, // block of >-quoted lines
+]
+
+/**
+ * Cut quoted reply history off a message body. Every message in the
+ * thread is stored as its own row, so the quoted chain is redundant.
+ * Keeps the original text when the whole body is quoted (e.g. forwards)
+ * so a message is never silently discarded.
+ */
+function stripQuotedReply(text: string): string {
+  let cut = text.length
+  for (const marker of QUOTE_MARKERS) {
+    const index = text.search(marker)
+    if (index !== -1 && index < cut) cut = index
+  }
+  const stripped = text.slice(0, cut).trimEnd()
+  return stripped || text.trim()
 }
 
 /**
@@ -147,8 +184,8 @@ export function getHeader(message: GmailMessage, name: string): string {
 }
 
 function base64Decode(data: string): string {
-  const sanitized = data.replace(/-/g, '+').replace(/_/g, '/')
-  return atob(sanitized)
+  // atob would decode to latin-1 and mangle multi-byte UTF-8.
+  return Buffer.from(data, 'base64url').toString('utf8')
 }
 
 function buildRawEmail(to: string, subject: string, body: string): string {

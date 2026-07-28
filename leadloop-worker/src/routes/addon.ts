@@ -4,6 +4,7 @@ import { debug } from '../lib/debug'
 import { enhanceDraft, suggestReply } from '../services/openai'
 import { findSimilarExamples, formatExamplesForPrompt } from '../services/retrieval'
 import { syncThreadFromGmail } from '../jobs/thread-sync'
+import { createFollowUpSchedule } from '../services/scheduling'
 
 const addon = new Hono<AppEnv>()
 
@@ -225,30 +226,15 @@ addon.post('/set-followup', async (c) => {
 
   const days = delay_days ?? 3
 
-  const { data: rule, error } = await supabase
-    .from('follow_up_rules')
-    .insert({
-      thread_id: thread.id,
-      user_id: userId,
-      delay_days: days,
-      template_id: template_id ?? null,
+  try {
+    const { rule } = await createFollowUpSchedule(supabase, userId, thread.id, {
+      delayDays: days,
+      templateId: template_id,
     })
-    .select()
-    .single()
-
-  if (error) return c.json({ error: error.message }, 500)
-
-  const scheduledFor = new Date()
-  scheduledFor.setDate(scheduledFor.getDate() + days)
-
-  await supabase.from('scheduled_follow_ups').insert({
-    rule_id: rule.id,
-    thread_id: thread.id,
-    user_id: userId,
-    scheduled_for: scheduledFor.toISOString(),
-  })
-
-  return c.json({ rule, message: `Follow-up scheduled in ${days} days` })
+    return c.json({ rule, message: `Follow-up scheduled in ${days} days` })
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+  }
 })
 
 export { addon }

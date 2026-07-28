@@ -18,10 +18,8 @@ export type Database = {
         Row: {
           condition: string
           created_at: string
-          current_count: number
           delay_days: number
           id: string
-          max_follow_ups: number
           status: string
           template_id: string | null
           thread_id: string
@@ -30,10 +28,8 @@ export type Database = {
         Insert: {
           condition?: string
           created_at?: string
-          current_count?: number
           delay_days?: number
           id?: string
-          max_follow_ups?: number
           status?: string
           template_id?: string | null
           thread_id: string
@@ -42,10 +38,8 @@ export type Database = {
         Update: {
           condition?: string
           created_at?: string
-          current_count?: number
           delay_days?: number
           id?: string
-          max_follow_ups?: number
           status?: string
           template_id?: string | null
           thread_id?: string

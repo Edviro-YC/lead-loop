@@ -22,6 +22,8 @@ Gmail Add-on (Apps Script)  ←→  Cloudflare Worker (API)  ←→  Supabase (D
                                    OpenAI (AI)
                                         ↓
 Dashboard (Next.js on Cloudflare Workers)  ←→  Cloudflare Worker
+                                        ↑
+AI agents (MCP clients: Cursor, Claude, …)  ←→  /mcp endpoint
 ```
 
 | Component | Tech | Purpose |
@@ -92,9 +94,10 @@ wrangler secret put OPENAI_API_KEY
 wrangler secret put GOOGLE_CLIENT_ID
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put ADDON_API_KEY
+wrangler secret put MCP_API_KEY
 ```
 
-For `ADDON_API_KEY`, generate any random string (e.g. `openssl rand -hex 32`). This is a shared secret between the Gmail add-on and the Worker.
+For `ADDON_API_KEY`, generate any random string (e.g. `openssl rand -hex 32`). This is a shared secret between the Gmail add-on and the Worker. `MCP_API_KEY` works the same way but for AI agents connecting to the [MCP server](#mcp-server-ai-agents) — use a different random string.
 
 For local development, copy the example env file:
 
@@ -187,7 +190,7 @@ Configure the add-on:
 - **Leads** — Add contacts manually or import them. Leads are auto-matched when you compose to their email.
 - **Threads** — View all threads you've added to LeadLoop and their sync status.
 - **Follow-ups** — See scheduled follow-up reminders and manage rules.
-- **Examples** — Curate successful outreach examples for AI-powered reply suggestions.
+- **Examples** — Curate successful outreach examples for AI-powered reply suggestions. Group them into **sequences** (ordered multi-touch arcs: cold email → bump → breakup); assign a thread to a sequence and follow-up drafts are personalized around the current step's example. "Save as Sequence" on a thread captures every sent message as ordered steps.
 - **Settings** — Copy your add-on API key.
 
 ### Gmail Add-on
@@ -200,6 +203,57 @@ When reading an email:
 When composing:
 - **Templates** — Pick a template to insert. Placeholders are auto-filled from lead data.
 - **Enhance Draft** — Paste a draft and get an AI-improved version.
+
+### MCP server (AI agents)
+
+**Live now:** `https://leadloop-worker.tanujsiripurapu.workers.dev/mcp` — deployed, tested, waiting on one secret. Agents (Cursor, Claude, etc.) can read and write your templates, outreach examples, and watched threads. Data stays in Supabase.
+
+Connect an agent (~3 minutes):
+
+1. Set the secret (once): `cd leadloop-worker && npx wrangler secret put MCP_API_KEY` — paste any random string (`openssl rand -hex 32` makes one)
+2. Paste into `.cursor/mcp.json`, swapping in your key and your Gmail:
+
+```json
+{
+  "mcpServers": {
+    "leadloop": {
+      "url": "https://leadloop-worker.tanujsiripurapu.workers.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_API_KEY",
+        "X-User-Email": "you@example.com"
+      }
+    }
+  }
+}
+```
+
+3. Ask the agent to run `list_templates`. Success = a JSON list. 401 or 403 = wrong key; "User not found" = `X-User-Email` doesn't match the `gmail_email` on your profile.
+
+Claude Code instead of Cursor:
+
+```bash
+claude mcp add --transport http leadloop \
+  https://leadloop-worker.tanujsiripurapu.workers.dev/mcp \
+  --header "Authorization: Bearer YOUR_MCP_API_KEY" \
+  --header "X-User-Email: you@example.com"
+```
+
+The 24 tools:
+
+- **Templates** — `list_templates`, `get_template`, `create_template`, `update_template`, `delete_template`. `{{variable}}` placeholders auto-detected on create/update.
+- **Examples** — `list_examples`, `search_examples` (semantic, pgvector), `create_example`, `update_example`, `delete_example`. Writes auto-embed; searchable within seconds. Examples can be placed in a sequence via `sequence_id` + `step_number`.
+- **Sequences** — `list_sequences`, `get_sequence`, `create_sequence`, `update_sequence`, `delete_sequence` (steps revert to standalone examples), `set_sequence_steps` (set/reorder steps from an ordered list of example ids).
+- **Watched threads** — `list_watched_threads`, `get_thread_messages`, `watch_thread` (upserts + syncs from Gmail), `update_watched_thread` (status, lead link, sequence assignment + step), `sync_thread`.
+- **Follow-ups** — `schedule_follow_up` (start the rule + first pending follow-up on a thread), `preview_follow_up_draft` (dry run: exact OpenAI prompt + generated body, no side effects), `trigger_follow_up` (run the pending scheduled follow-up now instead of waiting).
+
+Local test (needs `MCP_API_KEY` in `.dev.vars`): run `npm run dev` in `leadloop-worker/`, then:
+
+```bash
+npx @modelcontextprotocol/inspector --cli http://localhost:8787/mcp \
+  --transport http --method tools/list \
+  --header "Authorization: Bearer YOUR_MCP_API_KEY" \
+  --header "X-User-Email: you@example.com"
+```
 
 ## Project structure
 
@@ -218,6 +272,7 @@ leadloop/
 ├── leadloop-worker/          # Cloudflare Worker API
 │   └── src/
 │       ├── routes/           # API endpoints
+│       ├── mcp/              # MCP server + agent tools
 │       ├── jobs/             # Queue consumers
 │       ├── services/         # Gmail, OpenAI, retrieval
 │       ├── middleware/       # Auth, CORS
@@ -254,8 +309,8 @@ cd apps/gmail-addon && clasp push
 2. **Gmail Add-on**: A thin Apps Script client that renders Cards in the Gmail sidebar. All business logic lives in the Worker — the add-on just makes API calls.
 3. **Thread tracking**: When you "Add to LeadLoop", the Worker queues a sync job that fetches the full thread from Gmail and stores messages in Supabase.
 4. **Follow-ups**: A cron job checks every minute for due follow-ups and queues draft creation. The Worker creates a Gmail draft (never sends) so you can review and send manually.
-5. **AI suggestions**: Reply suggestions use thread context + similar outreach examples (pgvector cosine similarity) to generate contextual responses via OpenAI.
-6. **Security**: All tables use Row Level Security. The add-on authenticates via a shared API key + user email header. The dashboard uses Supabase JWT auth.
+5. **AI suggestions**: Reply suggestions use thread context + similar outreach examples (pgvector cosine similarity) to generate contextual responses via OpenAI. Threads assigned to a sequence get follow-up drafts modeled on the sequence's current step example (personalized, never copied); the step advances each time a draft is created, and an exhausted sequence dismisses the follow-up instead of silently drafting generic content.
+6. **Security**: All tables use Row Level Security. The add-on authenticates via a shared API key + user email header. The dashboard uses Supabase JWT auth. The MCP endpoint uses its own bearer API key + user email header, and every tool query is scoped to that user.
 
 ## License
 

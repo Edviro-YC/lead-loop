@@ -11,6 +11,7 @@ OPENAI_API_KEY=sk-...
 GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-...
 ADDON_API_KEY=generate-a-random-string
+MCP_API_KEY=generate-a-different-random-string
 
 # Optional: enable verbose timing/debug logs
 # DEBUG=true

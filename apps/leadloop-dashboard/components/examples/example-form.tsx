@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { workerFetch } from "@/lib/api";
 import { X } from "lucide-react";
+import type { Sequence } from "./example-list";
 
 interface ExampleFormProps {
   example?: {
@@ -12,7 +14,10 @@ interface ExampleFormProps {
     body: string;
     outcome: string | null;
     tags: string[] | null;
+    sequence_id: string | null;
+    step_number: number | null;
   } | null;
+  sequences: Sequence[];
   onClose: () => void;
   onSaved: () => void;
 }
@@ -23,12 +28,14 @@ const OUTCOMES = [
   { value: "converted", label: "Converted" },
 ];
 
-export function ExampleForm({ example, onClose, onSaved }: ExampleFormProps) {
+export function ExampleForm({ example, sequences, onClose, onSaved }: ExampleFormProps) {
   const [context, setContext] = useState(example?.context ?? "");
   const [subject, setSubject] = useState(example?.subject ?? "");
   const [body, setBody] = useState(example?.body ?? "");
   const [outcome, setOutcome] = useState(example?.outcome ?? "replied");
   const [tagsStr, setTagsStr] = useState((example?.tags ?? []).join(", "));
+  const [sequenceId, setSequenceId] = useState(example?.sequence_id ?? "");
+  const [stepStr, setStepStr] = useState(example?.step_number?.toString() ?? "1");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,26 +44,43 @@ export function ExampleForm({ example, onClose, onSaved }: ExampleFormProps) {
     setSaving(true);
     setError(null);
 
-    const supabase = createClient();
+    const stepNumber = Number(stepStr);
+    if (sequenceId && (!Number.isInteger(stepNumber) || stepNumber < 1)) {
+      setError("Step number must be a positive integer");
+      setSaving(false);
+      return;
+    }
+
     const tags = tagsStr
       .split(",")
       .map((t) => t.trim())
       .filter(Boolean);
 
+    // Writes go through the Worker API so embeddings get queued.
     const payload = {
       context,
       subject: subject || null,
       body,
       outcome,
       tags,
+      sequence_id: sequenceId || null,
+      step_number: sequenceId ? stepNumber : null,
     };
 
-    const result = example
-      ? await supabase.from("outreach_examples").update(payload).eq("id", example.id)
-      : await supabase.from("outreach_examples").insert(payload);
+    try {
+      const supabase = createClient();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
 
-    if (result.error) {
-      setError(result.error.message);
+      await workerFetch(example ? `/api/examples/${example.id}` : "/api/examples", {
+        method: example ? "PUT" : "POST",
+        token: session.access_token,
+        body: payload,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
       return;
     }
@@ -143,6 +167,41 @@ export function ExampleForm({ example, onClose, onSaved }: ExampleFormProps) {
               />
             </div>
           </div>
+
+          {sequences.length > 0 && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Sequence
+                </label>
+                <select
+                  value={sequenceId}
+                  onChange={(e) => setSequenceId(e.target.value)}
+                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none"
+                >
+                  <option value="">None (standalone)</option>
+                  {sequences.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+              {sequenceId && (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                    Step
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    required
+                    value={stepStr}
+                    onChange={(e) => setStepStr(e.target.value)}
+                    className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none"
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" onClick={onClose} className="rounded-md px-4 py-2 text-sm font-medium hover:bg-muted">

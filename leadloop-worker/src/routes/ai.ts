@@ -2,7 +2,12 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { enhanceDraft, suggestReply } from '../services/openai'
 import { createServiceClient } from '../lib/supabase'
-import { findSimilarExamples, formatExamplesForPrompt } from '../services/retrieval'
+import {
+  findSimilarExamples,
+  formatExamplesForPrompt,
+  loadSequenceContext,
+  type SequenceDraftContext,
+} from '../services/retrieval'
 
 const ai = new Hono<AppEnv>()
 
@@ -64,9 +69,36 @@ ai.post('/generate-followup', async (c) => {
     template_id?: string
   }>()
 
-  // If a template is provided, render it; otherwise generate from context
+  if (!thread_id) return c.json({ error: 'thread_id is required' }, 400)
+
+  const { data: thread, error: threadError } = await supabase
+    .from('watched_threads')
+    .select('sequence_id, sequence_step')
+    .eq('id', thread_id)
+    .single()
+  if (threadError || !thread) return c.json({ error: 'Thread not found' }, 404)
+
+  // An assigned sequence supplies the base content (and wins over any
+  // template); an exhausted sequence is an explicit error, not a fallback.
+  let sequence: SequenceDraftContext | undefined
   let baseText = ''
-  if (template_id) {
+  if (thread.sequence_id) {
+    const result = await loadSequenceContext(
+      supabase, c.get('userId'), thread.sequence_id, thread.sequence_step
+    )
+    if (result.status === 'exhausted') {
+      return c.json(
+        {
+          error:
+            `Thread is past the end of sequence "${result.name}" ` +
+            `(step ${thread.sequence_step} of ${result.totalSteps}). ` +
+            'Unassign the sequence or lower the thread\'s sequence_step.',
+        },
+        400
+      )
+    }
+    sequence = result.ctx
+  } else if (template_id) {
     const { data: template } = await supabase
       .from('templates')
       .select('body')
@@ -86,6 +118,7 @@ ai.post('/generate-followup', async (c) => {
     examples: [],
     baseText,
     isFollowUp: true,
+    sequence,
   })
 
   return c.json({ suggestion })
