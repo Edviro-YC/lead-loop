@@ -4,19 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import {
-  FileText,
-  Users,
-  MessageSquare,
-  Clock,
+  ListOrdered,
   Bookmark,
   Settings,
 } from "lucide-react";
 
 const navigation = [
-  { name: "Templates", href: "/templates", icon: FileText },
-  { name: "Leads", href: "/leads", icon: Users },
-  { name: "Threads", href: "/threads", icon: MessageSquare },
-  { name: "Follow-ups", href: "/follow-ups", icon: Clock },
+  { name: "Sequences", href: "/sequences", icon: ListOrdered },
   { name: "Examples", href: "/examples", icon: Bookmark },
   { name: "Settings", href: "/settings", icon: Settings },
 ];

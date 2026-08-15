@@ -1,22 +1,16 @@
 import { Hono } from 'hono'
 import { StreamableHTTPTransport } from '@hono/mcp'
-import type { AppBindings, AppEnv, FollowUpDraftMessage, EmbedExampleMessage } from './lib/types'
+import type { AppBindings, AppEnv, FollowUpDraftMessage } from './lib/types'
 import { createServiceClient } from './lib/supabase'
 import { debug } from './lib/debug'
 import { corsMiddleware } from './middleware/cors'
 import { jwtAuth, addonAuth, mcpAuth } from './middleware/auth'
 import { buildMcpServer } from './mcp/server'
-import { templates } from './routes/templates'
-import { leads } from './routes/leads'
-import { threads } from './routes/threads'
-import { followUps } from './routes/follow-ups'
-import { ai } from './routes/ai'
+import { runs } from './routes/runs'
 import { examples } from './routes/examples'
-import { sequences } from './routes/sequences'
 import { addon } from './routes/addon'
 import { processFollowUpDraft } from './jobs/follow-up-draft'
-import { embedOutreachExample } from './jobs/embed-example'
-import { getDueFollowUps } from './services/scheduling'
+import { getDueFollowUps } from './services/runs'
 
 const app = new Hono<AppEnv>()
 
@@ -29,13 +23,8 @@ app.get('/health', (c) => c.json({ status: 'ok', service: 'leadloop-worker' }))
 // Dashboard API routes (JWT auth)
 const api = new Hono<AppEnv>()
 api.use('*', jwtAuth)
-api.route('/templates', templates)
-api.route('/leads', leads)
-api.route('/threads', threads)
-api.route('/follow-ups', followUps)
-api.route('/ai', ai)
+api.route('/runs', runs)
 api.route('/examples', examples)
-api.route('/sequences', sequences)
 app.route('/api', api)
 
 // Gmail add-on routes (API key auth)
@@ -66,10 +55,10 @@ export default {
   fetch: app.fetch,
 
   /**
-   * Queue consumer: dispatches messages to the appropriate job handler.
+   * Queue consumer: creates follow-up drafts for due sequence steps.
    */
   async queue(
-    batch: MessageBatch<FollowUpDraftMessage | EmbedExampleMessage>,
+    batch: MessageBatch<FollowUpDraftMessage>,
     env: AppBindings,
     _ctx: ExecutionContext
   ): Promise<void> {
@@ -77,16 +66,7 @@ export default {
 
     for (const message of batch.messages) {
       try {
-        const payload = message.body
-
-        if ('scheduledFollowUpId' in payload) {
-          await processFollowUpDraft(supabase, env, payload as FollowUpDraftMessage)
-        } else if ('exampleId' in payload) {
-          await embedOutreachExample(supabase, env.OPENAI_API_KEY, payload as EmbedExampleMessage)
-        } else {
-          console.error('Unknown queue message payload:', payload)
-        }
-
+        await processFollowUpDraft(supabase, env, message.body)
         message.ack()
       } catch (err) {
         console.error('Queue job failed:', err)

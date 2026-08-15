@@ -15,7 +15,7 @@ describe('LeadLoop Worker', () => {
   })
 
   it('returns 401 for unauthenticated API requests', async () => {
-    const response = await SELF.fetch('http://localhost/api/templates')
+    const response = await SELF.fetch('http://localhost/api/runs')
     expect(response.status).toBe(401)
   })
 
@@ -122,25 +122,24 @@ describe('MCP endpoint', () => {
       })
       expect(response.status).toBe(200)
       const body = await readJsonRpc<{ result: { tools: Array<{ name: string }> } }>(response)
-      expect(body.result.tools).toHaveLength(24)
-      expect(body.result.tools.map((t) => t.name)).toContain('search_examples')
+      expect(body.result.tools).toHaveLength(14)
+      expect(body.result.tools.map((t) => t.name)).toContain('start_sequence')
     })
 
-    it('schedules a follow-up via tools/call', async () => {
+    it('rejects start_sequence when variables are missing', async () => {
       const json = { headers: { 'Content-Type': 'application/json' } }
       const origin = fetchMock.get('https://test-project.supabase.co')
       origin
-        .intercept({ method: 'GET', path: /^\/rest\/v1\/watched_threads/ })
-        .reply(200, JSON.stringify([{ id: 'thread-1' }]), json)
-      origin
-        .intercept({ method: 'GET', path: /^\/rest\/v1\/scheduled_follow_ups/ })
-        .reply(200, '[]', json)
-      origin
-        .intercept({ method: 'POST', path: /^\/rest\/v1\/follow_up_rules/ })
-        .reply(201, JSON.stringify({ id: 'rule-1', delay_days: 5 }), json)
-      origin
-        .intercept({ method: 'POST', path: /^\/rest\/v1\/scheduled_follow_ups/ })
-        .reply(201, JSON.stringify({ id: 'sched-1', scheduled_for: '2026-08-01T00:00:00Z' }), json)
+        .intercept({ method: 'GET', path: /^\/rest\/v1\/sequences/ })
+        .reply(
+          200,
+          JSON.stringify({
+            id: 'seq-1',
+            name: 'K-12 outreach',
+            steps: [{ body: 'Hi {{first_name}} of {{company}}, bumping this.', delay_days: 3 }],
+          }),
+          json
+        )
 
       const response = await SELF.fetch('http://localhost/mcp', {
         method: 'POST',
@@ -149,17 +148,18 @@ describe('MCP endpoint', () => {
           jsonrpc: '2.0',
           id: 3,
           method: 'tools/call',
-          params: { name: 'schedule_follow_up', arguments: { thread_id: 'thread-1', delay_days: 5 } },
+          params: {
+            name: 'start_sequence',
+            arguments: { sequence_id: 'seq-1', recipient_email: 'lead@example.com' },
+          },
         }),
       })
       expect(response.status).toBe(200)
       const body = await readJsonRpc<{
         result: { content: Array<{ text: string }>; isError?: boolean }
       }>(response)
-      expect(body.result.isError).toBeFalsy()
-      const payload = JSON.parse(body.result.content[0].text)
-      expect(payload.rule_id).toBe('rule-1')
-      expect(payload.scheduled_for).toBe('2026-08-01T00:00:00Z')
+      expect(body.result.isError).toBe(true)
+      expect(body.result.content[0].text).toContain('Missing variables: first_name, company')
     })
   })
 })
@@ -182,28 +182,18 @@ describe('MCP server tools', () => {
     expect(names).toEqual([
       'create_example',
       'create_sequence',
-      'create_template',
       'delete_example',
       'delete_sequence',
-      'delete_template',
+      'get_run',
       'get_sequence',
-      'get_template',
-      'get_thread_messages',
       'list_examples',
+      'list_runs',
       'list_sequences',
-      'list_templates',
-      'list_watched_threads',
-      'preview_follow_up_draft',
-      'schedule_follow_up',
-      'search_examples',
-      'set_sequence_steps',
-      'sync_thread',
-      'trigger_follow_up',
+      'save_run_as_example',
+      'start_sequence',
+      'stop_run',
       'update_example',
       'update_sequence',
-      'update_template',
-      'update_watched_thread',
-      'watch_thread',
     ])
 
     await client.close()

@@ -1,38 +1,44 @@
 # LeadLoop
 
-Open-source, self-hosted, human-in-the-loop email outreach copilot for Gmail.
+Open-source, self-hosted follow-up sequencer for Gmail. No AI, no auto-sending.
 
-LeadLoop helps you write better outreach emails and follow up consistently — without ever sending anything automatically. You stay in control. LeadLoop suggests, you decide.
+You (or your AI agents) write and send the personalized first email. Then you tag the thread into a sequence, and LeadLoop drafts every follow-up from the sequence's steps — threaded, variables filled, on each step's delay — as Gmail drafts you review and send yourself. A reply stops the run.
 
 ## What it does
 
-- **Insert templates** into compose windows with variable substitution (name, company, etc.)
-- **Enhance drafts** with AI-powered rewrites
-- **Suggest replies** based on thread context and your past successful outreach
-- **Track threads** and schedule follow-up reminders
-- **Run sequences** — assign a thread to an ordered arc of example emails and each follow-up draft picks up at the next step
-- **Manage leads, templates, and workflows** from a dashboard
+- **Sequences** — each carries its follow-up emails inline as ordered steps (bump → case study → breakup): a body with `{{variable}}` placeholders + a delay in days, per step
+- **Runs** — a thread enrolled in a sequence. LeadLoop syncs the thread, drafts the next step when due, advances, and stops on reply
+- **Examples** — tag winning runs so your GTM team can study what worked
+- **Three doors to enroll a thread** — MCP tool for agents, Gmail sidebar for one-offs, dashboard form for everything else (including phone sends)
 
-Everything happens inside Gmail. LeadLoop never sends emails on your behalf.
+LeadLoop never sends emails and never writes copy. It renders your steps and keeps the cadence.
+
+## The core workflow
+
+1. You or an agent send a personalized first email through Gmail.
+2. Enroll the thread: `start_sequence(sequence_id, recipient_email, variables: {first_name: "Sara", company: "Acme"})`. No Gmail thread ID needed — the Worker finds your newest sent thread to that address.
+3. Variables are validated against every step in the sequence up front. Missing variables are rejected with the exact list, so a draft can never go out with a raw `{{placeholder}}`.
+4. A cron job checks every 10 minutes. When a step is due, LeadLoop syncs the thread, then creates a threaded Gmail draft with variables substituted.
+5. You review the draft in Gmail and hit send. If the previous draft was never sent, LeadLoop defers instead of stacking drafts.
+6. A reply marks the run `replied` and dismisses remaining steps. When steps run out, the run is `completed`.
+7. Won the deal? Save the run as an example — the full conversation is copied into one row for GTM analysis.
 
 ## Architecture
 
 ```
 Gmail Add-on (Apps Script)  ←→  Cloudflare Worker (API)  ←→  Supabase (DB + Auth)
-                                        ↓
-                                   OpenAI (AI)
-                                        ↓
-Dashboard (Next.js on Cloudflare Workers)  ←→  Cloudflare Worker
-                                        ↑
+                                        ↕
+Dashboard (Next.js on Cloudflare Workers)
+                                        ↕
 AI agents (MCP clients: Cursor, Claude, …)  ←→  /mcp endpoint
 ```
 
 | Component | Tech | Purpose |
 |-----------|------|---------|
 | `apps/gmail-addon/` | Google Apps Script | Thin Gmail sidebar UI |
-| `leadloop-worker/` | Cloudflare Workers + Hono | API, business logic, queue consumers, cron jobs |
+| `leadloop-worker/` | Cloudflare Workers + Hono | API, sequence engine, queue consumer, cron |
 | `apps/leadloop-dashboard/` | Next.js 16, React 19, Tailwind (on Cloudflare Workers via OpenNext) | Management dashboard |
-| `supabase/migrations/` | PostgreSQL + pgvector | Database schema, RLS policies, vector search |
+| `supabase/migrations/` | PostgreSQL | Database schema + RLS policies |
 
 ## Prerequisites
 
@@ -40,7 +46,6 @@ You'll need accounts (all have free tiers sufficient for personal use):
 
 - [Supabase](https://supabase.com) — database and auth
 - [Cloudflare](https://cloudflare.com) — API Worker + dashboard hosting, queues, cron
-- [OpenAI](https://platform.openai.com) — AI generation and embeddings
 - [Google Cloud Console](https://console.cloud.google.com) — OAuth client for Gmail
 - [Node.js](https://nodejs.org) 18+ (npm workspaces are used, no other package manager needed)
 
@@ -65,7 +70,7 @@ supabase link --project-ref YOUR_PROJECT_REF
 supabase db push
 ```
 
-This runs the migrations in `supabase/migrations/` which create all tables, RLS policies, and the vector search function.
+This runs the migrations in `supabase/migrations/` which create all tables and RLS policies.
 
 In the Supabase dashboard:
 
@@ -91,7 +96,6 @@ Set up secrets:
 
 ```bash
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put OPENAI_API_KEY
 wrangler secret put GOOGLE_CLIENT_ID
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put ADDON_API_KEY
@@ -172,6 +176,23 @@ clasp create --type standalone --title "LeadLoop"
 clasp push
 ```
 
+#### New machine? Re-link the existing project (~2 minutes)
+
+`.clasp.json` holds the script ID and is gitignored, so a fresh clone can't push. Recreate it — do NOT run `clasp create` (makes a duplicate project) or `clasp clone` (overwrites local `.gs` files):
+
+```bash
+cd apps/gmail-addon
+clasp login
+cp .clasp.json.example .clasp.json
+clasp list   # prints your projects + script IDs
+```
+
+1. Copy the LeadLoop script ID from `clasp list` (or [script.google.com](https://script.google.com) > open the project > **Project Settings** > **Script ID**)
+2. Paste it over `YOUR_APPS_SCRIPT_ID` in `.clasp.json`
+3. Run `clasp push`
+
+If push fails with an Apps Script API error: enable it at [script.google.com/home/usersettings](https://script.google.com/home/usersettings), then push again.
+
 Configure the add-on:
 
 1. Open the script in the Apps Script editor: `clasp open`
@@ -181,33 +202,27 @@ Configure the add-on:
    - In the Apps Script editor, click **Deploy > Test deployments**
    - Click **Install** next to the Gmail add-on entry
 4. Open Gmail — the LeadLoop sidebar should appear when you open a message.
-5. Click **Settings** in the add-on and paste the same `ADDON_API_KEY` value you set in the Worker.
+5. Click **Settings** in the add-on and paste the same `ADDON_API_KEY` value you set in the Worker. (Cloudflare secrets can't be read back — if you've lost it, rotate: `openssl rand -hex 32`, then `npx wrangler secret put ADDON_API_KEY` and paste the new value here.)
 
 ## Usage
 
 ### Dashboard
 
-- **Templates** — Create reusable email templates with `{{name}}`, `{{company}}`, etc. placeholders.
-- **Leads** — Add contacts manually or import them. Leads are auto-matched when you compose to their email.
-- **Threads** — View all threads you've added to LeadLoop and their sync status. Open a thread to schedule a follow-up, assign a sequence, or save it as an example/sequence.
-- **Follow-ups** — See scheduled follow-up reminders and manage rules.
-- **Examples** — Curate successful outreach examples for AI-powered reply suggestions. Group them into **sequences** (ordered multi-touch arcs: cold email → bump → breakup); assign a thread to a sequence and follow-up drafts are personalized around the current step's example. "Save as Sequence" on a thread captures every sent message as ordered steps.
-- **Settings** — Copy your add-on API key.
+- **Sequences** — Create sequences and write their follow-up steps inline (body with `{{name}}`, `{{company}}`, etc. + wait days each), start runs (recipient email + variables), watch run progress (step X of Y, next draft date), stop runs, save winners as examples.
+- **Examples** — Browse saved winning conversations, filter by text or sequence. This is the GTM team's corpus.
+- **Settings** — Gmail connection status, usage stats, connect your AI agents over MCP.
 
 ### Gmail Add-on
 
 When reading an email:
-- **Add to LeadLoop** — Start tracking this thread. Syncs messages for context.
-- **Set Follow-up** — Schedule a follow-up reminder (in days).
-- **Suggest Reply** — Get an AI-suggested reply based on thread context and your outreach examples.
+- **No run yet** — "Start sequence" form: pick a sequence, fill its variables (recipient prefilled from the thread), go.
+- **Active run** — status card: step X of Y, next draft date, **Stop run**, **Save as example**.
 
-When composing:
-- **Templates** — Pick a template to insert. Placeholders are auto-filled from lead data.
-- **Enhance Draft** — Paste a draft and get an AI-improved version.
+Gmail add-ons don't run on mobile — for phone-sent emails, enroll via the dashboard or MCP instead.
 
 ### MCP server (AI agents)
 
-**Live now:** `https://leadloop-worker.tanujsiripurapu.workers.dev/mcp` — Agents (Cursor, Claude, etc.) can read and write your templates, outreach examples, sequences, watched threads, and follow-ups. Data stays in Supabase.
+**Live now:** `https://leadloop-worker.tanujsiripurapu.workers.dev/mcp` — the intended loop: your agent writes and sends the personalized first email, then immediately calls `start_sequence` with the lead's variables it already knows. No Gmail plumbing on the agent side.
 
 Connect an agent (~3 minutes):
 
@@ -228,7 +243,7 @@ Connect an agent (~3 minutes):
 }
 ```
 
-3. Ask the agent to run `list_templates`. Success = a JSON list. 401 or 403 = wrong key; "User not found" = `X-User-Email` doesn't match the `gmail_email` on your profile.
+3. Ask the agent to run `list_sequences`. Success = a JSON list. 401 or 403 = wrong key; "User not found" = `X-User-Email` doesn't match the `gmail_email` on your profile.
 
 Claude Code instead of Cursor:
 
@@ -239,13 +254,13 @@ claude mcp add --transport http leadloop \
   --header "X-User-Email: you@example.com"
 ```
 
-The 24 tools:
+The 14 tools:
 
-- **Templates** — `list_templates`, `get_template`, `create_template`, `update_template`, `delete_template`. `{{variable}}` placeholders auto-detected on create/update.
-- **Examples** — `list_examples`, `search_examples` (semantic, pgvector), `create_example`, `update_example`, `delete_example`. Writes auto-embed; searchable within seconds. Examples can be placed in a sequence via `sequence_id` + `step_number`.
-- **Sequences** — `list_sequences`, `get_sequence`, `create_sequence`, `update_sequence`, `delete_sequence` (steps revert to standalone examples), `set_sequence_steps` (set/reorder steps from an ordered list of example ids).
-- **Watched threads** — `list_watched_threads`, `get_thread_messages`, `watch_thread` (upserts + syncs from Gmail), `update_watched_thread` (status, lead link, sequence assignment + step), `sync_thread`.
-- **Follow-ups** — `schedule_follow_up` (start the rule + first pending follow-up on a thread), `preview_follow_up_draft` (dry run: exact OpenAI prompt + generated body, no side effects), `trigger_follow_up` (run the pending scheduled follow-up now instead of waiting).
+- **Sequences** — `list_sequences`, `get_sequence` (steps + the union of required variables), `create_sequence` (name + inline `steps: [{body, delay_days}]`), `update_sequence` (also replaces steps wholesale), `delete_sequence`.
+- **Runs** — `start_sequence` (enroll by `recipient_email` or `gmail_thread_id` + variables; strict validation), `list_runs`, `get_run` (progress + messages), `stop_run`, `save_run_as_example`.
+- **Examples** — `list_examples` (text search + tag/outcome/sequence filters), `create_example`, `update_example`, `delete_example`.
+
+The agent workflow: `create_sequence(name, steps)` once, then per lead — write and send the first email, `start_sequence(sequence_id, recipient_email, variables)`.
 
 Local test (needs `MCP_API_KEY` in `.dev.vars`): run `npm run dev` in `leadloop-worker/`, then:
 
@@ -274,13 +289,12 @@ leadloop/
 │   └── src/
 │       ├── routes/           # API endpoints
 │       ├── mcp/              # MCP server + agent tools
-│       ├── jobs/             # Queue consumers
-│       ├── services/         # Gmail, OpenAI, retrieval
+│       ├── jobs/             # Queue consumer (follow-up drafts)
+│       ├── services/         # Gmail, runs, threads
 │       ├── middleware/       # Auth, CORS
-│       └── lib/              # Types, Supabase client
-├── supabase/
-│   └── migrations/           # Database schema
-└── packages/                 # Shared code (future)
+│       └── lib/              # Types, Supabase client, step rendering
+└── supabase/
+    └── migrations/           # Database schema
 ```
 
 ## Development
@@ -304,13 +318,19 @@ npm run deploy:dashboard
 cd apps/gmail-addon && clasp push
 ```
 
+Run the Worker tests:
+
+```bash
+cd leadloop-worker && npm test
+```
+
 ## How it works
 
-1. **Auth**: Users sign in with Google via Supabase Auth. The OAuth flow captures a Gmail refresh token, enabling the Worker to fetch emails on their behalf.
+1. **Auth**: Users sign in with Google via Supabase Auth. The OAuth flow captures a Gmail refresh token, enabling the Worker to fetch mail and create drafts on their behalf.
 2. **Gmail Add-on**: A thin Apps Script client that renders Cards in the Gmail sidebar. All business logic lives in the Worker — the add-on just makes API calls.
-3. **Thread tracking**: When you "Add to LeadLoop", the Worker queues a sync job that fetches the full thread from Gmail and stores messages in Supabase.
-4. **Follow-ups**: Schedule from the Gmail add-on, the dashboard thread view, or via MCP (`schedule_follow_up`) — all three go through one shared code path, and a thread only ever has one pending follow-up. A cron job checks every 10 minutes for due follow-ups and queues draft creation. The Worker creates a Gmail draft (never sends) so you can review and send manually, then schedules the next one on the rule's cadence. There is no draft cap — a rule runs until the thread gets a reply, its sequence ends, or you cancel it.
-5. **AI suggestions**: Reply suggestions use thread context + similar outreach examples (pgvector cosine similarity) to generate contextual responses via OpenAI. Threads assigned to a sequence get follow-up drafts modeled on the current step's example — the prompt carries the entire sequence with the current step marked, so drafts stay close to the example (personalized, never copied) and end by proposing a brief pilot chat on a concrete day two days out (weekends roll to Monday). The step advances each time a draft is created, and an exhausted sequence dismisses the follow-up instead of silently drafting generic content.
+3. **Enrollment**: `start_sequence` (MCP, sidebar, or dashboard — one shared code path) resolves the thread from your sent mail if you only give an email address, validates variables against every step in the sequence, creates the run, and schedules step 1 at last-sent-time + the step's `delay_days`.
+4. **The engine**: A cron job checks every 10 minutes for due steps and queues draft creation. The job re-syncs the thread first: a reply dismisses the follow-up and marks the run `replied`; an unsent previous draft defers the step. Otherwise it renders the step body with the run's variables, creates a threaded Gmail draft (never sends), advances the step, and schedules the next one. Runs complete when steps run out.
+5. **Examples**: Saving a run copies the full conversation into one `outreach_examples` row (subject, rendered thread text, tags, the winning sequence). Self-contained — it survives thread deletion.
 6. **Security**: All tables use Row Level Security. The add-on authenticates via a shared API key + user email header. The dashboard uses Supabase JWT auth. The MCP endpoint uses its own bearer API key + user email header, and every tool query is scoped to that user.
 
 ## License

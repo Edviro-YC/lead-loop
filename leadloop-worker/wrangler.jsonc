@@ -14,12 +14,10 @@
 
 	"queues": {
 		"producers": [
-			{ "binding": "FOLLOW_UP_DRAFT_QUEUE", "queue": "leadloop-follow-up-draft" },
-			{ "binding": "EMBED_EXAMPLE_QUEUE", "queue": "leadloop-embed-example" }
+			{ "binding": "FOLLOW_UP_DRAFT_QUEUE", "queue": "leadloop-follow-up-draft" }
 		],
 		"consumers": [
-			{ "queue": "leadloop-follow-up-draft", "max_batch_size": 5, "max_retries": 3 },
-			{ "queue": "leadloop-embed-example", "max_batch_size": 10, "max_retries": 3 }
+			{ "queue": "leadloop-follow-up-draft", "max_batch_size": 5, "max_retries": 3 }
 		]
 	},
 

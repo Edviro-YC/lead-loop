@@ -7,7 +7,6 @@ DASHBOARD_URL=https://leadloop-dashboard.YOUR_SUBDOMAIN.workers.dev
 
 # Secrets
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
-OPENAI_API_KEY=sk-...
 GOOGLE_CLIENT_ID=123456789.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-...
 ADDON_API_KEY=generate-a-random-string

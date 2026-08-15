@@ -53,37 +53,45 @@ function fetchContext(gmailThreadId, toEmail) {
   });
 }
 
-function fetchInsertTemplate(templateId, toEmail) {
-  return apiRequest_('/addon/insert-template', 'POST', {
-    template_id: templateId,
-    to_email: toEmail || null
-  });
+/**
+ * Check the saved key against the Worker without throwing, so save/settings
+ * can show an exact success-or-fail status. Returns {ok, code, message}.
+ */
+function verifyApiKey_() {
+  try {
+    var response = UrlFetchApp.fetch(API_BASE + '/addon/context', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Addon-Key': getApiKey_(),
+        'X-User-Email': getUserEmail_()
+      },
+      payload: JSON.stringify({}),
+      muteHttpExceptions: true
+    });
+    var code = response.getResponseCode();
+    if (code === 200) return { ok: true, code: 200, message: 'Connected' };
+    var message = 'API error';
+    try { message = JSON.parse(response.getContentText()).error || message; } catch (ignored) {}
+    return { ok: false, code: code, message: message };
+  } catch (err) {
+    // Network-level failure (bad WORKER_URL, DNS, timeout) — no HTTP code.
+    return { ok: false, code: 0, message: err.message };
+  }
 }
 
-function fetchEnhance(draftText, leadContext) {
-  return apiRequest_('/addon/enhance', 'POST', {
-    draft_text: draftText,
-    lead_context: leadContext || {}
-  });
-}
-
-function fetchSuggestReply(gmailThreadId) {
-  return apiRequest_('/addon/suggest-reply', 'POST', {
-    gmail_thread_id: gmailThreadId
-  });
-}
-
-function fetchWatch(gmailThreadId, subject) {
-  return apiRequest_('/addon/watch', 'POST', {
+function fetchStartSequence(sequenceId, gmailThreadId, variables) {
+  return apiRequest_('/addon/start-sequence', 'POST', {
+    sequence_id: sequenceId,
     gmail_thread_id: gmailThreadId,
-    subject: subject || ''
+    variables: variables || {}
   });
 }
 
-function fetchSetFollowUp(gmailThreadId, delayDays, templateId) {
-  return apiRequest_('/addon/set-followup', 'POST', {
-    gmail_thread_id: gmailThreadId,
-    delay_days: delayDays || 3,
-    template_id: templateId || null
-  });
+function fetchStopRun(runId) {
+  return apiRequest_('/addon/stop-run', 'POST', { run_id: runId });
+}
+
+function fetchSaveExample(runId) {
+  return apiRequest_('/addon/save-example', 'POST', { run_id: runId });
 }

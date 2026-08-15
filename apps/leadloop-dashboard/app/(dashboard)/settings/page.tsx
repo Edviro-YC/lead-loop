@@ -16,13 +16,10 @@ export default async function SettingsPage() {
   const hasGmailToken = !!profile?.gmail_refresh_token;
 
   // Stats
-  const { count: templateCount } = await supabase
-    .from("templates")
+  const { count: sequenceCount } = await supabase
+    .from("sequences")
     .select("*", { count: "exact", head: true });
-  const { count: leadCount } = await supabase
-    .from("leads")
-    .select("*", { count: "exact", head: true });
-  const { count: threadCount } = await supabase
+  const { count: runCount } = await supabase
     .from("watched_threads")
     .select("*", { count: "exact", head: true })
     .eq("status", "active");
@@ -77,8 +74,8 @@ export default async function SettingsPage() {
           <h2 className="text-sm font-semibold">Gmail Add-on</h2>
           <div className="rounded-lg border border-border p-4 space-y-3">
             <p className="text-sm text-muted-foreground">
-              Install the LeadLoop Gmail add-on to use templates, AI
-              enhancement, and thread watching directly from Gmail.
+              Install the LeadLoop Gmail add-on to start or stop sequence runs
+              directly from Gmail.
             </p>
             <div className="rounded-md bg-muted p-3">
               <p className="mb-1 text-xs font-medium">Setup steps:</p>
@@ -92,7 +89,11 @@ export default async function SettingsPage() {
                   )
                 </li>
                 <li>
-                  Open the add-on in Gmail and enter the API key when prompted
+                  Open the add-on in Gmail and enter the Worker&apos;s{" "}
+                  <code className="rounded bg-background px-1">ADDON_API_KEY</code>{" "}
+                  secret when prompted (secrets can&apos;t be read back — rotate
+                  with <code className="rounded bg-background px-1">npx wrangler secret put ADDON_API_KEY</code>{" "}
+                  if lost)
                 </li>
               </ol>
             </div>
@@ -100,12 +101,48 @@ export default async function SettingsPage() {
         </section>
 
         <section className="space-y-4">
+          <h2 className="text-sm font-semibold">AI Agents (MCP)</h2>
+          <div className="rounded-lg border border-border p-4 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Your agents write and send the personalized first email, then
+              call <code className="rounded bg-muted px-1">start_sequence</code>{" "}
+              with the lead&apos;s variables — LeadLoop drafts every follow-up
+              from there. Add this to{" "}
+              <code className="rounded bg-muted px-1">.cursor/mcp.json</code>{" "}
+              (or your agent&apos;s MCP config):
+            </p>
+            <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs leading-relaxed">
+              {JSON.stringify(
+                {
+                  mcpServers: {
+                    leadloop: {
+                      url: `${process.env.NEXT_PUBLIC_WORKER_URL}/mcp`,
+                      headers: {
+                        Authorization: "Bearer YOUR_MCP_API_KEY",
+                        "X-User-Email": profile?.gmail_email ?? user?.email,
+                      },
+                    },
+                  },
+                },
+                null,
+                2
+              )}
+            </pre>
+            <p className="text-xs text-muted-foreground">
+              The key is the Worker&apos;s <code className="rounded bg-background px-1">MCP_API_KEY</code>{" "}
+              secret (<code className="rounded bg-background px-1">npx wrangler secret put MCP_API_KEY</code>).
+              Verify by asking the agent to run{" "}
+              <code className="rounded bg-background px-1">list_sequences</code>.
+            </p>
+          </div>
+        </section>
+
+        <section className="space-y-4">
           <h2 className="text-sm font-semibold">Usage</h2>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-3 gap-3">
             {[
-              { label: "Templates", count: templateCount ?? 0 },
-              { label: "Leads", count: leadCount ?? 0 },
-              { label: "Active Threads", count: threadCount ?? 0 },
+              { label: "Sequences", count: sequenceCount ?? 0 },
+              { label: "Active Runs", count: runCount ?? 0 },
               { label: "Examples", count: exampleCount ?? 0 },
             ].map((stat) => (
               <div

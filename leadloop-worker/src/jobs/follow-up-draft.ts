@@ -1,122 +1,20 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { FollowUpDraftMessage } from '../lib/types'
-import {
-  suggestReply,
-  buildSuggestReplyPrompt,
-  type SuggestReplyParams,
-} from '../services/openai'
 import { refreshAccessToken, createDraft } from '../services/gmail'
-import { scheduleNextFollowUp } from '../services/scheduling'
-import {
-  findSimilarExamples,
-  formatExamplesForPrompt,
-  loadSequenceContext,
-  type SequenceDraftContext,
-} from '../services/retrieval'
+import { scheduleStep, bareEmail, type SequenceStep } from '../services/runs'
+import { renderTemplate } from '../lib/render'
 import { syncThreadFromGmail } from './thread-sync'
 
 interface DraftEnv {
-  OPENAI_API_KEY: string
   GOOGLE_CLIENT_ID: string
   GOOGLE_CLIENT_SECRET: string
 }
 
-export interface FollowUpThread {
-  id: string
-  subject: string | null
-  sequence_id: string | null
-  sequence_step: number
-}
-
-export type FollowUpDraftPlan =
-  | { status: 'exhausted'; sequenceName: string; totalSteps: number }
-  | {
-      status: 'ok'
-      toEmail: string
-      subject: string
-      prompt: { system: string; user: string }
-      body: string
-    }
-
 /**
- * Compute everything about a thread's next follow-up draft -- recipient,
- * subject, the exact OpenAI prompt, and the generated body -- without
- * creating a Gmail draft or mutating any state. Shared by the queue job
- * and the MCP preview tool so previews match what actually gets drafted.
- */
-export async function planFollowUpDraft(
-  supabase: SupabaseClient,
-  openaiApiKey: string,
-  userId: string,
-  thread: FollowUpThread,
-  templateId?: string | null
-): Promise<FollowUpDraftPlan> {
-  // An assigned sequence supplies the base content (and wins over the
-  // rule's template). An exhausted sequence is reported explicitly --
-  // never a silent fallback to generic drafting.
-  let sequence: SequenceDraftContext | undefined
-  let baseText = ''
-  if (thread.sequence_id) {
-    const result = await loadSequenceContext(
-      supabase, userId, thread.sequence_id, thread.sequence_step
-    )
-    if (result.status === 'exhausted') {
-      return { status: 'exhausted', sequenceName: result.name, totalSteps: result.totalSteps }
-    }
-    sequence = result.ctx
-  } else if (templateId) {
-    const { data: template } = await supabase
-      .from('templates')
-      .select('body')
-      .eq('id', templateId)
-      .single()
-    baseText = template?.body ?? ''
-  }
-
-  const { data: messages } = await supabase
-    .from('thread_messages')
-    .select('direction, from_email, to_email, body_text, sent_at')
-    .eq('thread_id', thread.id)
-    .order('sent_at', { ascending: true })
-  const msgs = messages ?? []
-
-  // Reply to the other party: sender of their latest message, or -- on
-  // outbound-only threads with no reply yet -- the recipient of our last
-  // sent message. A thread with neither is an error, not an empty To:.
-  const newestFirst = [...msgs].reverse()
-  const toEmail =
-    newestFirst.find((m) => m.direction === 'received')?.from_email ??
-    newestFirst.find((m) => m.direction === 'sent')?.to_email
-  if (!toEmail) {
-    throw new Error(`Cannot determine follow-up recipient for thread ${thread.id}`)
-  }
-
-  const threadContext = msgs.map((m) => m.body_text ?? '').join('\n')
-  const retrieved = await findSimilarExamples(
-    supabase, openaiApiKey, userId, threadContext
-  )
-  const examples = formatExamplesForPrompt(retrieved)
-
-  const params: SuggestReplyParams = {
-    threadMessages: msgs,
-    examples,
-    baseText,
-    isFollowUp: true,
-    sequence,
-  }
-
-  return {
-    status: 'ok',
-    toEmail,
-    subject: `Re: ${thread.subject ?? ''}`,
-    prompt: buildSuggestReplyPrompt(params),
-    body: await suggestReply(openaiApiKey, params),
-  }
-}
-
-/**
- * Generate a follow-up email and create it as a Gmail draft.
- * Called by the follow-up-draft queue consumer.
+ * Create the next follow-up draft for a run. No AI: the body is the
+ * current step of the sequence with the run's stored {{variables}}
+ * filled in. Called by the follow-up-draft queue consumer; throwing
+ * lets the queue retry (e.g. transient Gmail failures).
  */
 export async function processFollowUpDraft(
   supabase: SupabaseClient,
@@ -125,7 +23,7 @@ export async function processFollowUpDraft(
 ): Promise<void> {
   const { data: followUp } = await supabase
     .from('scheduled_follow_ups')
-    .select('*, follow_up_rules(template_id, delay_days, condition)')
+    .select('id, thread_id, status')
     .eq('id', msg.scheduledFollowUpId)
     .single()
 
@@ -136,19 +34,36 @@ export async function processFollowUpDraft(
   const [{ data: thread }, { data: profile }] = await Promise.all([
     supabase
       .from('watched_threads')
-      .select('gmail_thread_id, subject, sequence_id, sequence_step')
+      .select(
+        'gmail_thread_id, subject, status, sequence_id, sequence_step, variables, sequences(steps)'
+      )
       .eq('id', threadId)
       .single(),
-    supabase.from('profiles').select('gmail_refresh_token, gmail_email').eq('id', msg.userId).single(),
+    supabase
+      .from('profiles')
+      .select('gmail_refresh_token, gmail_email')
+      .eq('id', msg.userId)
+      .single(),
   ])
 
+  if (!thread) {
+    console.error(`Thread ${threadId} not found`)
+    return
+  }
   if (!profile?.gmail_refresh_token) {
     console.error(`No Gmail credentials for user ${msg.userId}`)
     return
   }
 
-  if (!thread) {
-    console.error(`Thread ${threadId} not found`)
+  const dismiss = () =>
+    supabase
+      .from('scheduled_follow_ups')
+      .update({ status: 'dismissed', acted_at: new Date().toISOString() })
+      .eq('id', msg.scheduledFollowUpId)
+
+  // A stopped/replied/completed run never drafts.
+  if (thread.status !== 'active' || !thread.sequence_id) {
+    await dismiss()
     return
   }
 
@@ -160,49 +75,63 @@ export async function processFollowUpDraft(
     userEmail: profile.gmail_email ?? '',
   })
 
-  const rule = followUp.follow_up_rules
-  if (rule?.condition === 'no_reply') {
-    const { data: recentReceived } = await supabase
-      .from('thread_messages')
-      .select('id')
-      .eq('thread_id', threadId)
-      .eq('direction', 'received')
-      .limit(1)
+  const { data: messages } = await supabase
+    .from('thread_messages')
+    .select('direction, to_email, sent_at')
+    .eq('thread_id', threadId)
+    .order('sent_at', { ascending: true })
+  const msgs = messages ?? []
 
-    if (recentReceived?.length) {
-      await supabase
-        .from('scheduled_follow_ups')
-        .update({ status: 'dismissed', acted_at: new Date().toISOString() })
-        .eq('id', msg.scheduledFollowUpId)
-      return
-    }
+  // A reply ends the run.
+  if (msgs.some((m) => m.direction === 'received')) {
+    await dismiss()
+    await supabase.from('watched_threads').update({ status: 'replied' }).eq('id', threadId)
+    return
   }
 
-  const plan = await planFollowUpDraft(
-    supabase,
-    env.OPENAI_API_KEY,
-    msg.userId,
-    {
-      id: threadId,
-      subject: thread.subject,
-      sequence_id: thread.sequence_id,
-      sequence_step: thread.sequence_step,
-    },
-    rule?.template_id
-  )
+  const lastSent = [...msgs].reverse().find((m) => m.direction === 'sent')
+  if (!lastSent?.to_email) {
+    throw new Error(`Cannot determine follow-up recipient for thread ${threadId}`)
+  }
 
-  if (plan.status === 'exhausted') {
-    console.log(
-      `Sequence "${plan.sequenceName}" exhausted for thread ${threadId} ` +
-        `(step ${thread.sequence_step} of ${plan.totalSteps}); ` +
-        `dismissing follow-up ${msg.scheduledFollowUpId}`
-    )
+  // Previous step's draft still sitting unsent? Defer a day instead of
+  // stacking drafts (nothing outbound has appeared since it was created).
+  const { data: prevDrafts } = await supabase
+    .from('scheduled_follow_ups')
+    .select('acted_at')
+    .eq('thread_id', threadId)
+    .eq('status', 'draft_created')
+    .order('acted_at', { ascending: false })
+    .limit(1)
+  const prevDraftAt = prevDrafts?.[0]?.acted_at
+  if (prevDraftAt && new Date(lastSent.sent_at ?? 0) <= new Date(prevDraftAt)) {
+    const tomorrow = new Date()
+    tomorrow.setDate(tomorrow.getDate() + 1)
     await supabase
       .from('scheduled_follow_ups')
-      .update({ status: 'dismissed', acted_at: new Date().toISOString() })
+      .update({ scheduled_for: tomorrow.toISOString() })
       .eq('id', msg.scheduledFollowUpId)
     return
   }
+
+  // Current step. None = past the end (stale schedule): close out.
+  // PostgREST types the to-one join loosely, hence the cast.
+  const seq = thread.sequences as unknown as { steps?: SequenceStep[] } | null
+  const steps = seq?.steps ?? []
+  const step = steps[thread.sequence_step - 1]
+
+  if (!step) {
+    await dismiss()
+    await supabase.from('watched_threads').update({ status: 'completed' }).eq('id', threadId)
+    return
+  }
+
+  const variables = {
+    email: bareEmail(lastSent.to_email),
+    ...((thread.variables ?? {}) as Record<string, string>),
+  }
+  const body = renderTemplate(step.body, variables)
+  const subject = `Re: ${thread.subject ?? ''}`
 
   const { access_token } = await refreshAccessToken(
     env.GOOGLE_CLIENT_ID,
@@ -212,9 +141,9 @@ export async function processFollowUpDraft(
 
   const draft = await createDraft(
     { accessToken: access_token },
-    plan.toEmail,
-    plan.subject,
-    plan.body,
+    lastSent.to_email,
+    subject,
+    body,
     thread.gmail_thread_id
   )
 
@@ -223,26 +152,30 @@ export async function processFollowUpDraft(
     .update({
       status: 'draft_created',
       draft_gmail_id: draft.id,
-      generated_body: plan.body,
+      generated_body: body,
       acted_at: new Date().toISOString(),
     })
     .eq('id', msg.scheduledFollowUpId)
 
-  // A step was drafted; advance the thread's position in the sequence.
-  if (thread.sequence_id) {
+  // Advance; schedule the next step or complete the run.
+  const nextStep = thread.sequence_step + 1
+  const next = steps[nextStep - 1]
+
+  if (next) {
     const { error: stepError } = await supabase
       .from('watched_threads')
-      .update({ sequence_step: thread.sequence_step + 1 })
+      .update({ sequence_step: nextStep })
       .eq('id', threadId)
     if (stepError) {
-      throw new Error(`Draft ${draft.id} created but failed to advance sequence step: ${stepError.message}`)
+      throw new Error(
+        `Draft ${draft.id} created but failed to advance sequence step: ${stepError.message}`
+      )
     }
+    await scheduleStep(supabase, threadId, msg.userId, new Date(), next.delay_days)
+  } else {
+    await supabase
+      .from('watched_threads')
+      .update({ sequence_step: nextStep, status: 'completed' })
+      .eq('id', threadId)
   }
-
-  await scheduleNextFollowUp(
-    supabase,
-    followUp.rule_id,
-    threadId,
-    msg.userId
-  )
 }

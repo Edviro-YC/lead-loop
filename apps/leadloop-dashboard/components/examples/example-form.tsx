@@ -15,7 +15,6 @@ interface ExampleFormProps {
     outcome: string | null;
     tags: string[] | null;
     sequence_id: string | null;
-    step_number: number | null;
   } | null;
   sequences: Sequence[];
   onClose: () => void;
@@ -35,7 +34,6 @@ export function ExampleForm({ example, sequences, onClose, onSaved }: ExampleFor
   const [outcome, setOutcome] = useState(example?.outcome ?? "replied");
   const [tagsStr, setTagsStr] = useState((example?.tags ?? []).join(", "));
   const [sequenceId, setSequenceId] = useState(example?.sequence_id ?? "");
-  const [stepStr, setStepStr] = useState(example?.step_number?.toString() ?? "1");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,19 +42,11 @@ export function ExampleForm({ example, sequences, onClose, onSaved }: ExampleFor
     setSaving(true);
     setError(null);
 
-    const stepNumber = Number(stepStr);
-    if (sequenceId && (!Number.isInteger(stepNumber) || stepNumber < 1)) {
-      setError("Step number must be a positive integer");
-      setSaving(false);
-      return;
-    }
-
     const tags = tagsStr
       .split(",")
       .map((t) => t.trim())
       .filter(Boolean);
 
-    // Writes go through the Worker API so embeddings get queued.
     const payload = {
       context,
       subject: subject || null,
@@ -64,7 +54,6 @@ export function ExampleForm({ example, sequences, onClose, onSaved }: ExampleFor
       outcome,
       tags,
       sequence_id: sequenceId || null,
-      step_number: sequenceId ? stepNumber : null,
     };
 
     try {
@@ -169,37 +158,23 @@ export function ExampleForm({ example, sequences, onClose, onSaved }: ExampleFor
           </div>
 
           {sequences.length > 0 && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                  Sequence
-                </label>
-                <select
-                  value={sequenceId}
-                  onChange={(e) => setSequenceId(e.target.value)}
-                  className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none"
-                >
-                  <option value="">None (standalone)</option>
-                  {sequences.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-              </div>
-              {sequenceId && (
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                    Step
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    required
-                    value={stepStr}
-                    onChange={(e) => setStepStr(e.target.value)}
-                    className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none"
-                  />
-                </div>
-              )}
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                Winning sequence
+              </label>
+              <select
+                value={sequenceId}
+                onChange={(e) => setSequenceId(e.target.value)}
+                className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none"
+              >
+                <option value="">None</option>
+                {sequences.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                The sequence that produced this win, for GTM analysis.
+              </p>
             </div>
           )}
 

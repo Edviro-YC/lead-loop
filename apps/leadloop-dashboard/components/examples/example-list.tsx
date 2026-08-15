@@ -14,7 +14,6 @@ interface Example {
   outcome: string | null;
   tags: string[] | null;
   sequence_id: string | null;
-  step_number: number | null;
   created_at: string;
 }
 
@@ -32,10 +31,12 @@ const OUTCOME_LABELS: Record<string, string> = {
 
 function ExampleCard({
   example,
+  sequenceName,
   onEdit,
   onDelete,
 }: {
   example: Example;
+  sequenceName: string | null;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -43,16 +44,17 @@ function ExampleCard({
     <div className="rounded-lg border border-border p-4 space-y-2">
       <div className="flex items-start justify-between">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            {example.step_number != null && (
-              <span className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                Step {example.step_number}
-              </span>
-            )}
+          <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-medium">{example.context}</p>
             {example.outcome && (
               <span className="shrink-0 rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
                 {OUTCOME_LABELS[example.outcome] ?? example.outcome}
+              </span>
+            )}
+            {sequenceName && (
+              <span className="flex shrink-0 items-center gap-1 rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                <ListOrdered className="h-2.5 w-2.5" />
+                {sequenceName}
               </span>
             )}
           </div>
@@ -99,43 +101,15 @@ export function ExampleList({
   const router = useRouter();
   const [editing, setEditing] = useState<Example | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [sequenceFilter, setSequenceFilter] = useState("");
+
+  const sequenceName = new Map(sequences.map((s) => [s.id, s.name]));
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this example?")) return;
     const supabase = createClient();
     const { error } = await supabase.from("outreach_examples").delete().eq("id", id);
-    if (error) {
-      alert(`Delete failed: ${error.message}`);
-      return;
-    }
-    router.refresh();
-  }
-
-  async function handleNewSequence() {
-    const name = prompt("Sequence name (e.g. \"K-12 facilities cold outreach\"):");
-    if (!name?.trim()) return;
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      alert("Not signed in");
-      return;
-    }
-    const { error } = await supabase
-      .from("sequences")
-      .insert({ user_id: user.id, name: name.trim() });
-    if (error) {
-      alert(`Create failed: ${error.message}`);
-      return;
-    }
-    router.refresh();
-  }
-
-  async function handleDeleteSequence(seq: Sequence) {
-    if (!confirm(`Delete sequence "${seq.name}"? Its steps become standalone examples.`)) return;
-    const supabase = createClient();
-    const { error } = await supabase.from("sequences").delete().eq("id", seq.id);
     if (error) {
       alert(`Delete failed: ${error.message}`);
       return;
@@ -149,11 +123,15 @@ export function ExampleList({
     router.refresh();
   }
 
-  const standalone = examples.filter((ex) => !ex.sequence_id);
-  const stepsOf = (sequenceId: string) =>
-    examples
-      .filter((ex) => ex.sequence_id === sequenceId)
-      .sort((a, b) => (a.step_number ?? 0) - (b.step_number ?? 0));
+  const needle = filter.trim().toLowerCase();
+  const visible = examples.filter((ex) => {
+    if (sequenceFilter && ex.sequence_id !== sequenceFilter) return false;
+    if (!needle) return true;
+    return [ex.context, ex.subject ?? "", ex.body, ...(ex.tags ?? [])]
+      .join("\n")
+      .toLowerCase()
+      .includes(needle);
+  });
 
   return (
     <>
@@ -161,93 +139,61 @@ export function ExampleList({
         <div>
           <h1 className="text-lg font-semibold">Outreach Examples</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            {examples.length} curated example{examples.length !== 1 ? "s" : ""}
-            {sequences.length > 0 &&
-              ` · ${sequences.length} sequence${sequences.length !== 1 ? "s" : ""}`}{" "}
-            for AI reply suggestions.
+            {examples.length} winning conversation{examples.length !== 1 ? "s" : ""} tagged
+            for the GTM team.
           </p>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={handleNewSequence}
-            className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
-          >
-            New Sequence
-          </button>
-          <button
-            onClick={() => setShowNew(true)}
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            Add Example
-          </button>
-        </div>
+        <button
+          onClick={() => setShowNew(true)}
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          Add Example
+        </button>
       </div>
 
-      <div className="space-y-8 p-6">
-        {sequences.map((seq) => {
-          const steps = stepsOf(seq.id);
-          return (
-            <section key={seq.id}>
-              <div className="mb-3 flex items-start justify-between">
-                <div className="flex items-start gap-2">
-                  <ListOrdered className="mt-0.5 h-4 w-4 text-muted-foreground" />
-                  <div>
-                    <h2 className="text-sm font-semibold">{seq.name}</h2>
-                    <p className="text-xs text-muted-foreground">
-                      {seq.description ? `${seq.description} · ` : ""}
-                      {steps.length} step{steps.length !== 1 ? "s" : ""}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => handleDeleteSequence(seq)}
-                  className="p-1 text-muted-foreground hover:text-destructive"
-                  title="Delete sequence (steps become standalone examples)"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              {steps.length === 0 ? (
-                <p className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">
-                  No steps yet. Add an example and pick this sequence, or ask your agent to
-                  build it via MCP.
-                </p>
-              ) : (
-                <div className="space-y-3">
-                  {steps.map((ex) => (
-                    <ExampleCard
-                      key={ex.id}
-                      example={ex}
-                      onEdit={() => setEditing(ex)}
-                      onDelete={() => handleDelete(ex.id)}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-          );
-        })}
-
-        {sequences.length > 0 && standalone.length > 0 && (
-          <h2 className="text-sm font-semibold text-muted-foreground">Standalone examples</h2>
+      <div className="space-y-4 p-6">
+        {examples.length > 0 && (
+          <div className="flex gap-2">
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="w-full max-w-sm rounded-md border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none"
+              placeholder="Filter by text or tag…"
+            />
+            {sequences.length > 0 && (
+              <select
+                value={sequenceFilter}
+                onChange={(e) => setSequenceFilter(e.target.value)}
+                className="rounded-md border border-border px-2 py-2 text-sm focus:border-primary focus:outline-none"
+              >
+                <option value="">All sequences</option>
+                {sequences.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         )}
 
         {examples.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border p-12 text-center">
             <Bookmark className="mx-auto mb-3 h-8 w-8 text-muted-foreground/50" />
             <p className="text-sm text-muted-foreground">
-              No examples yet. Add successful outreach emails to improve AI reply suggestions.
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              The more examples you add, the better LeadLoop gets at matching your voice and style.
+              No examples yet. When a run gets a reply, save it here (one click on the
+              Sequences page, in Gmail, or via MCP).
             </p>
           </div>
+        ) : visible.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No examples match the filter.</p>
         ) : (
           <div className="space-y-3">
-            {standalone.map((ex) => (
+            {visible.map((ex) => (
               <ExampleCard
                 key={ex.id}
                 example={ex}
+                sequenceName={ex.sequence_id ? (sequenceName.get(ex.sequence_id) ?? null) : null}
                 onEdit={() => setEditing(ex)}
                 onDelete={() => handleDelete(ex.id)}
               />

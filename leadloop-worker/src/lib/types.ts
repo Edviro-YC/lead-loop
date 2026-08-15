@@ -15,7 +15,6 @@ export interface AppBindings {
 
   // Secrets (set via `wrangler secret put`)
   SUPABASE_SERVICE_ROLE_KEY: string
-  OPENAI_API_KEY: string
   GOOGLE_CLIENT_ID: string
   GOOGLE_CLIENT_SECRET: string
   ADDON_API_KEY: string
@@ -26,7 +25,6 @@ export interface AppBindings {
 
   // Queue producer bindings
   FOLLOW_UP_DRAFT_QUEUE: Queue
-  EMBED_EXAMPLE_QUEUE: Queue
 }
 
 export interface AppVariables {
@@ -41,12 +39,8 @@ export type AppEnv = {
 
 export type AppContext = Context<AppEnv>
 
-// Queue message payload types
+// Queue message payload
 export interface FollowUpDraftMessage {
   scheduledFollowUpId: string
   userId: string
-}
-
-export interface EmbedExampleMessage {
-  exampleId: string
 }

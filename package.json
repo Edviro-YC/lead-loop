@@ -4,8 +4,7 @@
   "private": true,
   "workspaces": [
     "apps/*",
-    "leadloop-worker",
-    "packages/*"
+    "leadloop-worker"
   ],
   "scripts": {
     "dev:dashboard": "npm run dev -w leadloop-dashboard",

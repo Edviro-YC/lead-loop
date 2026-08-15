@@ -1,40 +1,69 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { jsonResult, errorResult, type ToolContext } from '../helpers'
-import { findSimilarExamples } from '../../services/retrieval'
-import { assertSequenceOwned } from './sequences'
 
-const EXAMPLE_COLUMNS = 'id, context, subject, body, outcome, tags, sequence_id, step_number, created_at'
+const EXAMPLE_COLUMNS = 'id, context, subject, body, outcome, tags, sequence_id, created_at'
+
+/** The service-role client bypasses RLS, so linking to a sequence checks ownership explicitly. */
+async function assertSequenceOwned(
+  supabase: SupabaseClient,
+  userId: string,
+  sequenceId: string
+): Promise<string | null> {
+  const { data } = await supabase
+    .from('sequences')
+    .select('id')
+    .eq('id', sequenceId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  return data ? null : 'Sequence not found'
+}
 
 export function registerExampleTools(server: McpServer, ctx: ToolContext): void {
-  const { supabase, env, userId } = ctx
+  const { supabase, userId } = ctx
 
   server.registerTool(
     'list_examples',
     {
       title: 'List outreach examples',
       description:
-        'List the user\'s saved outreach examples (successful emails used as AI reference material), newest first.',
+        "List the user's saved outreach examples (winning conversations tagged for GTM analysis), " +
+        'newest first. Filter by tag, outcome, the sequence that won, or a text query.',
       inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe('Text search over context, subject, and body'),
         tag: z.string().optional().describe('Only examples tagged with this tag'),
-        outcome: z.string().optional().describe('Only examples with this outcome (e.g. "replied", "meeting_booked")'),
-        sequence_id: z.string().optional().describe('Only steps of this sequence (UUID), ordered by step'),
+        outcome: z
+          .string()
+          .optional()
+          .describe('Only examples with this outcome (e.g. "replied", "meeting_booked")'),
+        sequence_id: z
+          .string()
+          .optional()
+          .describe('Only examples produced by this sequence (UUID)'),
         limit: z.number().int().min(1).max(100).optional().describe('Max results (default all)'),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ tag, outcome, sequence_id, limit }) => {
+    async ({ query: text, tag, outcome, sequence_id, limit }) => {
       let query = supabase
         .from('outreach_examples')
         .select(EXAMPLE_COLUMNS)
         .eq('user_id', userId)
+        .order('created_at', { ascending: false })
 
-      query = sequence_id
-        ? query.eq('sequence_id', sequence_id).order('step_number', { ascending: true })
-        : query.order('created_at', { ascending: false })
-
+      if (text) {
+        const escaped = text.replace(/[%_,()]/g, ' ').trim()
+        query = query.or(
+          `context.ilike.%${escaped}%,subject.ilike.%${escaped}%,body.ilike.%${escaped}%`
+        )
+      }
       if (tag) query = query.contains('tags', [tag])
       if (outcome) query = query.eq('outcome', outcome)
+      if (sequence_id) query = query.eq('sequence_id', sequence_id)
       if (limit) query = query.limit(limit)
 
       const { data, error } = await query
@@ -44,79 +73,41 @@ export function registerExampleTools(server: McpServer, ctx: ToolContext): void 
   )
 
   server.registerTool(
-    'search_examples',
-    {
-      title: 'Search outreach examples',
-      description:
-        'Semantic search over the user\'s outreach examples using embeddings. Describe the situation (e.g. "cold outreach to a K-12 facilities director about energy costs") and get the most similar past emails with similarity scores.',
-      inputSchema: {
-        query: z.string().min(1).describe('Natural-language description of the outreach situation'),
-        limit: z.number().int().min(1).max(20).optional().describe('Max results (default 5)'),
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ query, limit }) => {
-      const examples = await findSimilarExamples(
-        supabase,
-        env.OPENAI_API_KEY,
-        userId,
-        query,
-        limit ?? 5
-      )
-      return jsonResult({ examples })
-    }
-  )
-
-  server.registerTool(
     'create_example',
     {
       title: 'Create outreach example',
       description:
-        'Save an outreach example (an email that worked well) for the AI to reference when drafting. An embedding is generated asynchronously so the example becomes semantically searchable shortly after creation.',
+        'Save an outreach example (an email or conversation that worked) for the GTM team to ' +
+        'analyze. To capture a whole run, prefer save_run_as_example.',
       inputSchema: {
         context: z
           .string()
           .min(1)
           .describe('The situation this email was written for (who, why, what stage)'),
         subject: z.string().optional().describe('Email subject line'),
-        body: z.string().min(1).describe('The email body that was sent'),
+        body: z.string().min(1).describe('The email or conversation text'),
         outcome: z.string().optional().describe('What happened (e.g. "replied", "meeting_booked")'),
         tags: z.array(z.string()).optional().describe('Tags for filtering'),
         sequence_id: z
           .string()
           .optional()
-          .describe('Sequence (UUID) this example is a step of; requires step_number'),
-        step_number: z
-          .number()
-          .int()
-          .min(1)
-          .optional()
-          .describe('1-based position within the sequence; requires sequence_id'),
+          .describe('Sequence (UUID) that produced this win, if any'),
       },
       annotations: { destructiveHint: false },
     },
-    async ({ context, subject, body, outcome, tags, sequence_id, step_number }) => {
-      if ((sequence_id === undefined) !== (step_number === undefined)) {
-        return errorResult('sequence_id and step_number must be provided together')
-      }
+    async ({ context, subject, body, outcome, tags, sequence_id }) => {
       if (sequence_id) {
-        const ownership = await assertSequenceOwned(ctx, sequence_id)
+        const ownership = await assertSequenceOwned(supabase, userId, sequence_id)
         if (ownership) return errorResult(ownership)
       }
 
       const { data, error } = await supabase
         .from('outreach_examples')
-        .insert({ user_id: userId, context, subject, body, outcome, tags, sequence_id, step_number })
+        .insert({ user_id: userId, context, subject, body, outcome, tags, sequence_id })
         .select(EXAMPLE_COLUMNS)
         .single()
 
       if (error) return errorResult(error.message)
-
-      // Embedding is generated by the queue consumer (jobs/embed-example.ts).
-      if (data) {
-        await env.EMBED_EXAMPLE_QUEUE.send({ exampleId: data.id })
-      }
-
       return jsonResult({ example: data })
     }
   )
@@ -126,7 +117,8 @@ export function registerExampleTools(server: McpServer, ctx: ToolContext): void 
     {
       title: 'Update outreach example',
       description:
-        'Update fields of an existing outreach example. Changing context, subject, or body triggers re-embedding. Set sequence_id + step_number to place it in a sequence, sequence_id null to remove it, or step_number alone to move it within its current sequence.',
+        'Update fields of an existing outreach example. Set sequence_id null to unlink it from ' +
+        'its sequence.',
       inputSchema: {
         id: z.string().describe('Example id (UUID)'),
         context: z.string().min(1).optional(),
@@ -138,30 +130,22 @@ export function registerExampleTools(server: McpServer, ctx: ToolContext): void 
           .string()
           .nullable()
           .optional()
-          .describe('Sequence (UUID) to place this example in (requires step_number), or null to remove it from its sequence'),
-        step_number: z.number().int().min(1).optional().describe('1-based position within the sequence'),
+          .describe('Sequence (UUID) that produced this win, or null to unlink'),
       },
       annotations: { destructiveHint: false, idempotentHint: true },
     },
-    async ({ id, sequence_id, step_number, ...fields }) => {
+    async ({ id, sequence_id, ...fields }) => {
       const updates: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(fields)) {
         if (value !== undefined) updates[key] = value
       }
 
-      if (sequence_id === null) {
-        updates.sequence_id = null
-        updates.step_number = null
-      } else if (sequence_id !== undefined) {
-        if (step_number === undefined) {
-          return errorResult('step_number is required when setting sequence_id')
+      if (sequence_id !== undefined) {
+        if (sequence_id !== null) {
+          const ownership = await assertSequenceOwned(supabase, userId, sequence_id)
+          if (ownership) return errorResult(ownership)
         }
-        const ownership = await assertSequenceOwned(ctx, sequence_id)
-        if (ownership) return errorResult(ownership)
         updates.sequence_id = sequence_id
-        updates.step_number = step_number
-      } else if (step_number !== undefined) {
-        updates.step_number = step_number
       }
 
       if (Object.keys(updates).length === 0) return errorResult('No fields to update')
@@ -175,12 +159,6 @@ export function registerExampleTools(server: McpServer, ctx: ToolContext): void 
         .single()
 
       if (error || !data) return errorResult(error?.message ?? 'Example not found')
-
-      // Re-embed if searchable content changed.
-      if (updates.context !== undefined || updates.body !== undefined || updates.subject !== undefined) {
-        await env.EMBED_EXAMPLE_QUEUE.send({ exampleId: data.id })
-      }
-
       return jsonResult({ example: data })
     }
   )

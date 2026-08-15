@@ -1,10 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { ToolContext } from './helpers'
-import { registerTemplateTools } from './tools/templates'
 import { registerExampleTools } from './tools/examples'
-import { registerThreadTools } from './tools/threads'
+import { registerRunTools } from './tools/runs'
 import { registerSequenceTools } from './tools/sequences'
-import { registerFollowUpTools } from './tools/follow-ups'
 
 /**
  * Build a per-request MCP server with all LeadLoop tools registered,
@@ -12,13 +10,11 @@ import { registerFollowUpTools } from './tools/follow-ups'
  * a fresh instance is created for every HTTP request.
  */
 export function buildMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: 'leadloop', version: '1.0.0' })
+  const server = new McpServer({ name: 'leadloop', version: '2.0.0' })
 
-  registerTemplateTools(server, ctx)
-  registerExampleTools(server, ctx)
-  registerThreadTools(server, ctx)
   registerSequenceTools(server, ctx)
-  registerFollowUpTools(server, ctx)
+  registerRunTools(server, ctx)
+  registerExampleTools(server, ctx)
 
   return server
 }

@@ -79,6 +79,29 @@ export async function getThread(
 }
 
 /**
+ * Find the user's most recent sent thread to the given address.
+ * Lets enrollment resolve "I just emailed sara@acme.com" into a
+ * Gmail thread id without the caller ever knowing one.
+ */
+export async function findLatestSentThread(
+  tokens: GmailTokens,
+  toEmail: string
+): Promise<string | null> {
+  const q = encodeURIComponent(`in:sent to:${toEmail}`)
+  const res = await fetch(`${GMAIL_API}/users/me/threads?q=${q}&maxResults=1`, {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` },
+  })
+
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Gmail thread search failed (${res.status}): ${err}`)
+  }
+
+  const data = (await res.json()) as { threads?: Array<{ id: string }> }
+  return data.threads?.[0]?.id ?? null
+}
+
+/**
  * Create a draft in the user's Gmail.
  */
 export async function createDraft(

@@ -14,280 +14,152 @@ function onMessageOpen(e) {
     var messageId = e.gmail.messageId;
     var token = ScriptApp.getOAuthToken();
     var resp = UrlFetchApp.fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + messageId + '?fields=threadId,payload/headers&format=metadata&metadataHeaders=Subject',
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + messageId + '?fields=threadId&format=minimal',
       { headers: { 'Authorization': 'Bearer ' + token }, muteHttpExceptions: true }
     );
     var threadId = null;
-    var subject = '';
     if (resp.getResponseCode() === 200) {
-      var msgData = JSON.parse(resp.getContentText());
-      threadId = msgData.threadId;
-      if (msgData.payload && msgData.payload.headers) {
-        for (var i = 0; i < msgData.payload.headers.length; i++) {
-          if (msgData.payload.headers[i].name === 'Subject') {
-            subject = msgData.payload.headers[i].value;
-            break;
-          }
-        }
-      }
+      threadId = JSON.parse(resp.getContentText()).threadId;
     }
     if (!threadId) {
-      var message = GmailApp.getMessageById(messageId);
-      threadId = message.getThread().getId();
-      subject = message.getSubject();
+      threadId = GmailApp.getMessageById(messageId).getThread().getId();
       debugLog_('GmailApp fallback used');
     }
-    debugLog_('threadId+subject lookup: ' + (Date.now() - t1) + 'ms');
+    debugLog_('threadId lookup: ' + (Date.now() - t1) + 'ms');
 
     var t2 = Date.now();
     var ctx = fetchContext(threadId, null);
     debugLog_('fetchContext: ' + (Date.now() - t2) + 'ms');
 
-    var card = CardService.newCardBuilder()
-      .setHeader(CardService.newCardHeader().setTitle('LeadLoop'));
-
-    var leadSection = buildLeadInfoSection_(ctx.lead);
-    if (leadSection) card.addSection(leadSection);
-
-    var isWatched = !!(ctx.watched_thread && ctx.watched_thread.id);
-    card.addSection(buildThreadActionsSection_(threadId, isWatched, subject));
-
     debugLog_('onMessageOpen total: ' + (Date.now() - t0) + 'ms');
-    return [card.build()];
+    return [buildMessageCard_(threadId, ctx)];
   } catch (err) {
     debugLog_('onMessageOpen error after ' + (Date.now() - t0) + 'ms: ' + err.message);
     return [buildErrorCard_(err.message)];
   }
 }
 
-function onCompose(e) {
-  var t0 = Date.now();
-  if (!getApiKey_()) return [buildSetupCard_()];
-
-  try {
-    var toRecipients = e.draftMetadata
-      ? e.draftMetadata.toRecipients || []
-      : [];
-    var toEmail = toRecipients.length > 0 ? toRecipients[0] : '';
-
-    var t1 = Date.now();
-    var ctx = fetchContext(null, toEmail);
-    debugLog_('fetchContext: ' + (Date.now() - t1) + 'ms');
-
-    var card = CardService.newCardBuilder()
-      .setHeader(CardService.newCardHeader().setTitle('LeadLoop'));
-
-    var leadSection = buildLeadInfoSection_(ctx.lead);
-    if (leadSection) card.addSection(leadSection);
-
-    card.addSection(buildTemplatePickerSection_(ctx.templates));
-
-    var aiSection = CardService.newCardSection().setHeader('AI Tools');
-    var descIcon = CardService.newIconImage().setIcon(CardService.Icon.DESCRIPTION);
-    aiSection.addWidget(
-      CardService.newDecoratedText()
-        .setText('Enhance Draft')
-        .setStartIcon(descIcon)
-        .setOnClickAction(
-          CardService.newAction().setFunctionName('onEnhanceDraft')
-        )
-    );
-    card.addSection(aiSection);
-
-    debugLog_('onCompose total: ' + (Date.now() - t0) + 'ms');
-    return [card.build()];
-  } catch (err) {
-    return [buildErrorCard_(err.message)];
-  }
-}
-
 // ─── Action handlers ────────────────────────────────────────────────────────
 
-function onInsertTemplate(e) {
-  var t0 = Date.now();
-  var templateId = e.parameters.template_id;
+function onStartSequenceForm(e) {
+  var variables = JSON.parse(e.parameters.variables || '[]');
 
-  var toRecipients = (e.draftMetadata && e.draftMetadata.toRecipients) || [];
-  var toEmail = toRecipients.length > 0 ? toRecipients[0] : '';
+  var section = CardService.newCardSection()
+    .setHeader(e.parameters.sequence_name);
 
-  var result = fetchInsertTemplate(templateId, toEmail);
-  debugLog_('fetchInsertTemplate: ' + (Date.now() - t0) + 'ms');
-
-  var response = CardService.newUpdateDraftActionResponseBuilder();
-
-  if (result.subject) {
-    response.setUpdateDraftSubjectAction(
-      CardService.newUpdateDraftSubjectAction().addUpdateSubject(result.subject)
+  if (variables.length === 0) {
+    section.addWidget(
+      CardService.newTextParagraph().setText('This sequence needs no variables.')
     );
+  } else {
+    section.addWidget(
+      CardService.newTextParagraph().setText('Fill the sequence variables for this lead.')
+    );
+    variables.forEach(function(v) {
+      section.addWidget(
+        CardService.newTextInput()
+          .setFieldName('var_' + v)
+          .setTitle('{{' + v + '}}')
+      );
+    });
   }
 
-  if (result.body) {
-    response.setUpdateDraftBodyAction(
-      CardService.newUpdateDraftBodyAction()
-        .addUpdateContent(result.body, CardService.ContentType.MUTABLE_HTML)
-        .setUpdateType(CardService.UpdateDraftBodyType.INSERT_AT_START)
-    );
-  }
+  section.addWidget(
+    CardService.newTextButton()
+      .setText('Start sequence')
+      .setOnClickAction(
+        CardService.newAction()
+          .setFunctionName('onStartSequenceSubmit')
+          .setParameters({
+            thread_id: e.parameters.thread_id,
+            sequence_id: e.parameters.sequence_id,
+            variables: e.parameters.variables
+          })
+      )
+  );
 
-  return response.build();
-}
-
-function onEnhanceDraft(e) {
   var card = CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('Enhance Draft'))
-    .addSection(
-      CardService.newCardSection()
-        .setHeader('Paste your draft below')
-        .addWidget(
-          CardService.newTextInput()
-            .setFieldName('draft_text')
-            .setTitle('Draft text')
-            .setMultiline(true)
-            .setHint('The email body you want to improve')
-        )
-        .addWidget(
-          CardService.newTextButton()
-            .setText('Enhance')
-            .setOnClickAction(
-              CardService.newAction().setFunctionName('onEnhanceSubmit')
-            )
-        )
-    );
+    .setHeader(CardService.newCardHeader().setTitle('Start sequence'))
+    .addSection(section);
 
   return CardService.newActionResponseBuilder()
     .setNavigation(CardService.newNavigation().pushCard(card.build()))
     .build();
 }
 
-function onEnhanceSubmit(e) {
-  var draftText = e.formInput.draft_text;
-  if (!draftText) {
+function onStartSequenceSubmit(e) {
+  var threadId = e.parameters.thread_id;
+  var names = JSON.parse(e.parameters.variables || '[]');
+
+  var variables = {};
+  names.forEach(function(v) {
+    variables[v] = (e.formInput && e.formInput['var_' + v]) || '';
+  });
+
+  try {
+    var result = fetchStartSequence(e.parameters.sequence_id, threadId, variables);
+  } catch (err) {
     return CardService.newActionResponseBuilder()
-      .setNotification(CardService.newNotification().setText('Please paste your draft text.'))
+      .setNotification(CardService.newNotification().setText(err.message))
       .build();
   }
 
-  var result = fetchEnhance(draftText);
-
-  var card = CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('Enhanced Draft'))
-    .addSection(
-      CardService.newCardSection()
-        .setHeader('Result')
-        .addWidget(CardService.newTextParagraph().setText(result.enhanced))
-        .addWidget(
-          CardService.newTextButton()
-            .setText('Copy to clipboard')
-            .setOnClickAction(
-              CardService.newAction()
-                .setFunctionName('showCopyNotification')
-            )
-        )
-    );
+  var nextAt = result.next_draft_at
+    ? new Date(result.next_draft_at).toLocaleDateString()
+    : 'soon';
 
   return CardService.newActionResponseBuilder()
-    .setNavigation(CardService.newNavigation().pushCard(card.build()))
+    .setNotification(
+      CardService.newNotification().setText('Sequence started. Next draft ' + nextAt + '.')
+    )
+    .setNavigation(
+      CardService.newNavigation()
+        .popToRoot()
+        .updateCard(buildMessageCard_(threadId, fetchContext(threadId, null)))
+    )
     .build();
 }
 
-function onSuggestReply(e) {
+function onStopRun(e) {
   var threadId = e.parameters.thread_id;
-  var result = fetchSuggestReply(threadId);
 
-  var card = CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('Suggest Reply'));
-
-  if (result.suggestion) {
-    card.addSection(
-      CardService.newCardSection()
-        .setHeader('Suggested reply')
-        .addWidget(CardService.newTextParagraph().setText(result.suggestion))
-    );
-  } else {
-    card.addSection(
-      CardService.newCardSection()
-        .addWidget(CardService.newTextParagraph().setText(result.message || 'No suggestion available.'))
-    );
+  try {
+    fetchStopRun(e.parameters.run_id);
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText(err.message))
+      .build();
   }
 
   return CardService.newActionResponseBuilder()
-    .setNavigation(CardService.newNavigation().pushCard(card.build()))
+    .setNotification(CardService.newNotification().setText('Run stopped.'))
+    .setNavigation(
+      CardService.newNavigation()
+        .updateCard(buildMessageCard_(threadId, fetchContext(threadId, null)))
+    )
     .build();
 }
 
-function onWatchThread(e) {
-  var threadId = e.parameters.thread_id;
-  var subject = e.parameters.subject || '';
-
-  var result = fetchWatch(threadId, subject);
-
-  var ctx = fetchContext(threadId, null);
-
-  var card = CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('LeadLoop'));
-
-  var leadSection = buildLeadInfoSection_(ctx.lead);
-  if (leadSection) card.addSection(leadSection);
-
-  card.addSection(buildThreadActionsSection_(threadId, true, subject));
+function onSaveExample(e) {
+  try {
+    fetchSaveExample(e.parameters.run_id);
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText(err.message))
+      .build();
+  }
 
   return CardService.newActionResponseBuilder()
     .setNotification(
-      CardService.newNotification().setText(result.message || 'Thread added to LeadLoop.')
+      CardService.newNotification().setText('Saved to Examples for the GTM team.')
     )
-    .setNavigation(CardService.newNavigation().updateCard(card.build()))
-    .build();
-}
-
-function onSetFollowUpForm(e) {
-  var threadId = e.parameters.thread_id;
-
-  var card = CardService.newCardBuilder()
-    .setHeader(CardService.newCardHeader().setTitle('Schedule Follow-up'))
-    .addSection(
-      CardService.newCardSection()
-        .setHeader('Timing')
-        .addWidget(
-          CardService.newTextInput()
-            .setFieldName('delay_days')
-            .setTitle('Days until follow-up')
-            .setValue('3')
-            .setHint('e.g. 3 for three days from now')
-        )
-        .addWidget(
-          CardService.newTextButton()
-            .setText('Schedule')
-            .setOnClickAction(
-              CardService.newAction()
-                .setFunctionName('onSetFollowUpSubmit')
-                .setParameters({ thread_id: threadId })
-            )
-        )
-    );
-
-  return CardService.newActionResponseBuilder()
-    .setNavigation(CardService.newNavigation().pushCard(card.build()))
-    .build();
-}
-
-function onSetFollowUpSubmit(e) {
-  var threadId = e.parameters.thread_id;
-  var delayDays = parseInt(e.formInput.delay_days) || 3;
-
-  var result = fetchSetFollowUp(threadId, delayDays);
-
-  return CardService.newActionResponseBuilder()
-    .setNotification(
-      CardService.newNotification().setText(result.message || 'Follow-up scheduled.')
-    )
-    .setNavigation(CardService.newNavigation().popCard())
     .build();
 }
 
 // ─── Utility actions ────────────────────────────────────────────────────────
 
 function saveApiKey(e) {
-  var apiKey = e.formInput.api_key;
+  var apiKey = ((e.formInput && e.formInput.api_key) || '').trim();
   if (!apiKey) {
     return CardService.newActionResponseBuilder()
       .setNotification(CardService.newNotification().setText('Please enter an API key.'))
@@ -296,19 +168,21 @@ function saveApiKey(e) {
 
   PropertiesService.getUserProperties().setProperty('ADDON_API_KEY', apiKey);
 
+  // Verify immediately so the toast reports real success or the exact failure.
+  var check = verifyApiKey_();
+  var text = check.ok
+    ? 'Connected (HTTP 200). Reopen a message to use LeadLoop.'
+    : 'Key saved but rejected — HTTP ' + check.code + ': ' + check.message;
+  if (!check.ok) {
+    console.error('LeadLoop key verification failed: HTTP ' + check.code + ' — ' + check.message);
+  }
+
   return CardService.newActionResponseBuilder()
-    .setNotification(CardService.newNotification().setText('API key saved. Reload the add-on.'))
+    .setNotification(CardService.newNotification().setText(text))
+    .setNavigation(CardService.newNavigation().updateCard(buildSetupCard_()))
     .build();
 }
 
 function showSettings(e) {
   return [buildSetupCard_()];
-}
-
-function showCopyNotification(e) {
-  return CardService.newActionResponseBuilder()
-    .setNotification(
-      CardService.newNotification().setText('Copy the text above and paste into your draft.')
-    )
-    .build();
 }

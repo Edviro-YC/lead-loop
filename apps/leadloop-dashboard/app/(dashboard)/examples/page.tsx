@@ -6,7 +6,7 @@ export default async function ExamplesPage() {
   const [{ data: examples }, { data: sequences }] = await Promise.all([
     supabase
       .from("outreach_examples")
-      .select("id, context, subject, body, outcome, tags, sequence_id, step_number, created_at")
+      .select("id, context, subject, body, outcome, tags, sequence_id, created_at")
       .order("created_at", { ascending: false }),
     supabase
       .from("sequences")

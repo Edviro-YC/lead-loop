@@ -1,25 +1,27 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { jsonResult, errorResult, type ToolContext } from '../helpers'
+import { extractVariables } from '../../lib/render'
+import type { SequenceStep } from '../../services/runs'
 
-/**
- * Verify a sequence belongs to the user. Required on every write that
- * takes a sequence id: this is the service-role client, so RLS is bypassed.
- */
-export async function assertSequenceOwned(
-  ctx: ToolContext,
-  sequenceId: string
-): Promise<string | null> {
-  const { data, error } = await ctx.supabase
-    .from('sequences')
-    .select('id')
-    .eq('id', sequenceId)
-    .eq('user_id', ctx.userId)
-    .maybeSingle()
+const stepSchema = z.object({
+  body: z
+    .string()
+    .min(1)
+    .describe('Follow-up email body; use {{variable}} placeholders (e.g. {{first_name}})'),
+  delay_days: z
+    .number()
+    .int()
+    .min(1)
+    .describe('Days to wait after the previous email before drafting this step (minimum 1)'),
+})
 
-  if (error) return error.message
-  if (!data) return `Sequence ${sequenceId} not found`
-  return null
+const stepsField = z
+  .array(stepSchema)
+  .describe('Ordered follow-up emails: first item = step 1, drafted delay_days after your first email')
+
+function requiredVariables(steps: SequenceStep[]): string[] {
+  return [...new Set(steps.flatMap((s) => extractVariables(s.body)))].filter((v) => v !== 'email')
 }
 
 export function registerSequenceTools(server: McpServer, ctx: ToolContext): void {
@@ -30,22 +32,23 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
     {
       title: 'List sequences',
       description:
-        'List the user\'s outreach sequences (named, ordered groups of outreach examples that model a multi-touch arc), newest first, with their step counts.',
+        "List the user's follow-up sequences (each carries its ordered follow-up emails as steps, " +
+        'modeling a multi-touch arc: bump, case study, breakup, ...), newest first, with step counts.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
     async () => {
       const { data, error } = await supabase
         .from('sequences')
-        .select('id, name, description, created_at, outreach_examples(count)')
+        .select('id, name, description, created_at, steps')
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
 
       if (error) return errorResult(error.message)
 
-      const sequences = (data ?? []).map(({ outreach_examples, ...seq }) => ({
+      const sequences = (data ?? []).map(({ steps, ...seq }) => ({
         ...seq,
-        step_count: (outreach_examples as unknown as Array<{ count: number }>)[0]?.count ?? 0,
+        step_count: ((steps ?? []) as SequenceStep[]).length,
       }))
       return jsonResult({ sequences })
     }
@@ -56,7 +59,8 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
     {
       title: 'Get sequence',
       description:
-        'Fetch one sequence with its full ordered steps (each step is an outreach example with context, subject, and body).',
+        'Fetch one sequence with its ordered steps (body + delay_days each) and the ' +
+        '{{variables}} required to start a run of it.',
       inputSchema: {
         id: z.string().describe('Sequence id (UUID)'),
       },
@@ -65,7 +69,7 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
     async ({ id }) => {
       const { data: sequence, error } = await supabase
         .from('sequences')
-        .select('id, name, description, created_at')
+        .select('id, name, description, steps, created_at')
         .eq('id', id)
         .eq('user_id', userId)
         .maybeSingle()
@@ -73,15 +77,8 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
       if (error) return errorResult(error.message)
       if (!sequence) return errorResult('Sequence not found')
 
-      const { data: steps, error: stepsError } = await supabase
-        .from('outreach_examples')
-        .select('id, step_number, context, subject, body, outcome, tags')
-        .eq('sequence_id', id)
-        .eq('user_id', userId)
-        .order('step_number', { ascending: true })
-
-      if (stepsError) return errorResult(stepsError.message)
-      return jsonResult({ sequence, steps })
+      const steps = (sequence.steps ?? []) as SequenceStep[]
+      return jsonResult({ sequence, required_variables: requiredVariables(steps) })
     }
   )
 
@@ -90,21 +87,24 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
     {
       title: 'Create sequence',
       description:
-        'Create an empty outreach sequence. Add steps by calling create_example (or update_example) with sequence_id and step_number, or reorder existing examples with set_sequence_steps.',
+        'Create a follow-up sequence with its steps inline. Each step is a follow-up email ' +
+        '(body with {{variable}} placeholders + delay_days). You send the personalized first ' +
+        'email yourself; steps are what LeadLoop drafts after it.',
       inputSchema: {
         name: z.string().min(1).describe('Sequence name (e.g. "K-12 facilities cold outreach")'),
         description: z
           .string()
           .optional()
           .describe('Who this sequence targets and what arc it follows'),
+        steps: stepsField.optional(),
       },
       annotations: { destructiveHint: false },
     },
-    async ({ name, description }) => {
+    async ({ name, description, steps }) => {
       const { data, error } = await supabase
         .from('sequences')
-        .insert({ user_id: userId, name, description })
-        .select('id, name, description, created_at')
+        .insert({ user_id: userId, name, description, steps: steps ?? [] })
+        .select('id, name, description, steps, created_at')
         .single()
 
       if (error) return errorResult(error.message)
@@ -116,18 +116,23 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
     'update_sequence',
     {
       title: 'Update sequence',
-      description: 'Rename a sequence or change its description.',
+      description:
+        'Update a sequence: rename, change description, or replace its steps wholesale ' +
+        '(pass the full ordered steps array — it overwrites the existing one). ' +
+        'Active runs pick up step edits on their next draft.',
       inputSchema: {
         id: z.string().describe('Sequence id (UUID)'),
         name: z.string().min(1).optional(),
         description: z.string().optional(),
+        steps: stepsField.optional(),
       },
       annotations: { destructiveHint: false, idempotentHint: true },
     },
-    async ({ id, name, description }) => {
+    async ({ id, name, description, steps }) => {
       const updates: Record<string, unknown> = {}
       if (name !== undefined) updates.name = name
       if (description !== undefined) updates.description = description
+      if (steps !== undefined) updates.steps = steps
       if (Object.keys(updates).length === 0) return errorResult('No fields to update')
 
       const { data, error } = await supabase
@@ -135,7 +140,7 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
         .update(updates)
         .eq('id', id)
         .eq('user_id', userId)
-        .select('id, name, description, created_at')
+        .select('id, name, description, steps, created_at')
         .single()
 
       if (error || !data) return errorResult(error?.message ?? 'Sequence not found')
@@ -148,7 +153,7 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
     {
       title: 'Delete sequence',
       description:
-        'Delete a sequence. Its step examples are NOT deleted — they revert to standalone outreach examples. Threads assigned to it are unassigned.',
+        'Delete a sequence and its steps. Runs assigned to it are unassigned (no more drafts).',
       inputSchema: {
         id: z.string().describe('Sequence id (UUID)'),
       },
@@ -165,68 +170,6 @@ export function registerSequenceTools(server: McpServer, ctx: ToolContext): void
       if (error) return errorResult(error.message)
       if (!data?.length) return errorResult('Sequence not found')
       return jsonResult({ deleted: true, id })
-    }
-  )
-
-  server.registerTool(
-    'set_sequence_steps',
-    {
-      title: 'Set sequence steps',
-      description:
-        'Set a sequence\'s steps to exactly this ordered list of example ids (first id = step 1). Examples currently in the sequence but not listed revert to standalone. Use for adding, removing, and reordering steps in one call.',
-      inputSchema: {
-        sequence_id: z.string().describe('Sequence id (UUID)'),
-        example_ids: z
-          .array(z.string())
-          .min(1)
-          .describe('Example ids (UUIDs) in step order'),
-      },
-      annotations: { destructiveHint: false, idempotentHint: true },
-    },
-    async ({ sequence_id, example_ids }) => {
-      const ownership = await assertSequenceOwned(ctx, sequence_id)
-      if (ownership) return errorResult(ownership)
-
-      // All listed examples must exist and belong to the user before touching anything.
-      const { data: owned, error: ownedError } = await supabase
-        .from('outreach_examples')
-        .select('id')
-        .eq('user_id', userId)
-        .in('id', example_ids)
-
-      if (ownedError) return errorResult(ownedError.message)
-      const ownedIds = new Set((owned ?? []).map((e) => e.id))
-      const missing = example_ids.filter((id) => !ownedIds.has(id))
-      if (missing.length) return errorResult(`Examples not found: ${missing.join(', ')}`)
-      if (new Set(example_ids).size !== example_ids.length) {
-        return errorResult('example_ids contains duplicates')
-      }
-
-      // ponytail: two-phase (clear membership, then reassign) instead of a
-      // transaction, to sidestep the unique (sequence_id, step_number) index
-      // during reorders; fine for a single-user tool.
-      const { error: clearError } = await supabase
-        .from('outreach_examples')
-        .update({ sequence_id: null, step_number: null })
-        .eq('sequence_id', sequence_id)
-
-      if (clearError) return errorResult(clearError.message)
-
-      for (const [index, id] of example_ids.entries()) {
-        const { error } = await supabase
-          .from('outreach_examples')
-          .update({ sequence_id, step_number: index + 1 })
-          .eq('id', id)
-          .eq('user_id', userId)
-        if (error) {
-          return errorResult(`Failed at step ${index + 1} (example ${id}): ${error.message}`)
-        }
-      }
-
-      return jsonResult({
-        sequence_id,
-        steps: example_ids.map((id, i) => ({ step_number: i + 1, example_id: id })),
-      })
     }
   )
 }
