@@ -211,14 +211,31 @@ function base64Decode(data: string): string {
   return Buffer.from(data, 'base64url').toString('utf8')
 }
 
-function buildRawEmail(to: string, subject: string, body: string): string {
+/**
+ * Render plain step text as minimal Gmail-style HTML. Plain-text parts
+ * get hard-wrapped at ~78 cols on send (ragged mid-sentence breaks for
+ * the recipient); HTML keeps paragraphs intact and links clickable.
+ */
+function textToHtml(text: string): string {
+  const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const linked = escaped.replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}">${u}</a>`)
+  return `<div dir="ltr">${linked.replace(/\n/g, '<br>')}</div>`
+}
+
+export function buildRawEmail(to: string, subject: string, body: string): string {
+  // Non-ASCII subjects need RFC 2047 encoding (raw UTF-8 is invalid in headers).
+  const subj = /^[\x20-\x7e]*$/.test(subject)
+    ? subject
+    : `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`
+  // ponytail: html-only part; add multipart/alternative if deliverability filters complain.
   const email = [
     `To: ${to}`,
-    `Subject: ${subject}`,
-    'Content-Type: text/plain; charset=utf-8',
+    `Subject: ${subj}`,
+    'Content-Type: text/html; charset=utf-8',
     '',
-    body,
+    textToHtml(body),
   ].join('\r\n')
 
-  return btoa(email).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  // btoa throws on non-Latin1; Buffer encodes UTF-8 (mirror of base64Decode).
+  return Buffer.from(email, 'utf8').toString('base64url')
 }

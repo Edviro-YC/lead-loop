@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { describe, expect, it } from 'vitest'
-import { extractBody } from './gmail'
+import { buildRawEmail, extractBody } from './gmail'
 
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64url')
 
@@ -83,5 +83,25 @@ describe('extractBody', () => {
     expect(extractBody(msg(payload, 'Can&#39;t wait &amp; thanks'))).toBe(
       "Can't wait & thanks"
     )
+  })
+})
+
+describe('buildRawEmail', () => {
+  it('builds an HTML part: UTF-8 survives, newlines become <br>, URLs get linked, HTML is escaped', () => {
+    const body = 'Quick bump — let’s sync 🚀\n\nRead: https://blog.example.com/post/ & reply <soon>'
+    const raw = buildRawEmail('sara@acme.com', 'Re: Café rollout', body)
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8')
+    expect(decoded).toContain('Content-Type: text/html; charset=utf-8')
+    expect(decoded).toContain('Quick bump — let’s sync 🚀<br><br>')
+    expect(decoded).toContain('<a href="https://blog.example.com/post/">https://blog.example.com/post/</a>')
+    expect(decoded).toContain('&amp; reply &lt;soon&gt;')
+    expect(decoded).toContain(
+      `Subject: =?UTF-8?B?${Buffer.from('Re: Café rollout', 'utf8').toString('base64')}?=`
+    )
+  })
+
+  it('leaves plain-ASCII subjects readable', () => {
+    const raw = buildRawEmail('sara@acme.com', 'Re: Rollout', 'plain body')
+    expect(Buffer.from(raw, 'base64url').toString('utf8')).toContain('Subject: Re: Rollout')
   })
 })
