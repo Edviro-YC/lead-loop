@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
-import { describe, expect, it } from 'vitest'
-import { buildRawEmail, extractBody } from './gmail'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { buildRawEmail, extractBody, sendDraft } from './gmail'
 
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64url')
 
@@ -103,5 +103,43 @@ describe('buildRawEmail', () => {
   it('leaves plain-ASCII subjects readable', () => {
     const raw = buildRawEmail('sara@acme.com', 'Re: Rollout', 'plain body')
     expect(Buffer.from(raw, 'base64url').toString('utf8')).toContain('Subject: Re: Rollout')
+  })
+})
+
+describe('sendDraft', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function stubFetch(status: number, body: unknown) {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return new Response(JSON.stringify(body), { status })
+    })
+    return calls
+  }
+
+  it('POSTs exactly the stored draft id to drafts.send and returns the sent message', async () => {
+    const calls = stubFetch(200, { id: 'msg-9', threadId: 'thr-3' })
+
+    const result = await sendDraft({ accessToken: 'tok-1' }, 'r-draft-42')
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('https://gmail.googleapis.com/gmail/v1/users/me/drafts/send')
+    expect(calls[0].init.method).toBe('POST')
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer tok-1')
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ id: 'r-draft-42' })
+    expect(result).toEqual({ id: 'msg-9', threadId: 'thr-3' })
+  })
+
+  it('returns null — a distinct not-found result, never success — when Gmail 404s', async () => {
+    stubFetch(404, { error: { code: 404 } })
+    expect(await sendDraft({ accessToken: 'tok-1' }, 'gone-draft')).toBeNull()
+  })
+
+  it('throws on other Gmail failures so callers report them, not swallow them', async () => {
+    stubFetch(500, { error: { code: 500 } })
+    await expect(sendDraft({ accessToken: 'tok-1' }, 'r-1')).rejects.toThrow(
+      'Gmail sendDraft failed (500)'
+    )
   })
 })

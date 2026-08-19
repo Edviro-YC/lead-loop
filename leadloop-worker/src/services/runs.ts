@@ -1,7 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { refreshAccessToken, findLatestSentThread } from './gmail'
+import { refreshAccessToken, findLatestSentThread, sendDraft } from './gmail'
 import { syncThreadFromGmail } from '../jobs/thread-sync'
 import { extractVariables } from '../lib/render'
+import type { FollowUpDraftMessage } from '../lib/types'
 
 /**
  * Run lifecycle: enrollment (startSequence), scheduling, stopping, and
@@ -22,7 +23,101 @@ export function bareEmail(address: string): string {
 }
 
 /**
+ * Follow-up lifecycle:
+ *   pending -> drafting (leased) -> draft_created -> sending (leased) -> sent
+ * with terminal side-exits: superseded (a manual outgoing message replaced
+ * the draft), draft_missing (Gmail 404 with no send evidence — blocks the
+ * cadence), dismissed (reply/stop/completion). Leases make claims atomic;
+ * an expired lease means the claiming Worker died and the row is claimable
+ * again.
+ */
+export const OUTSTANDING_DRAFT_STATUSES = ['draft_created', 'sending', 'draft_missing'] as const
+
+const LEASE_MINUTES = 10
+
+export function leaseEnd(from = new Date()): string {
+  return new Date(from.getTime() + LEASE_MINUTES * 60_000).toISOString()
+}
+
+/**
+ * Newest outgoing message time strictly after `afterIso` (null = any).
+ * Timestamps come from both PostgREST (`+00:00`) and toISOString (`Z`),
+ * so compare as dates, never as strings.
+ */
+export function newestOutgoingAfter(
+  messages: Array<{ direction: string; sent_at: string | null }>,
+  afterIso: string | null
+): string | null {
+  const after = afterIso ? new Date(afterIso).getTime() : -Infinity
+  let newest: { t: number; iso: string } | null = null
+  for (const m of messages) {
+    if (m.direction !== 'sent' || !m.sent_at) continue
+    const t = new Date(m.sent_at).getTime()
+    if (Number.isNaN(t)) continue
+    if (!newest || t > newest.t) newest = { t, iso: m.sent_at }
+  }
+  return newest && newest.t > after ? newest.iso : null
+}
+
+/** Due time for a step whose wait is anchored on the actual send time. */
+export function nextDueFrom(sendTimeIso: string, delayDays: number): string {
+  const due = new Date(sendTimeIso)
+  due.setDate(due.getDate() + delayDays)
+  return due.toISOString()
+}
+
+/** PostgREST types the to-one `sequences(steps)` join loosely, hence the cast. */
+export function stepsOf(run: { sequences?: unknown }): SequenceStep[] {
+  const seq = run.sequences as { steps?: SequenceStep[] } | null | undefined
+  return seq?.steps ?? []
+}
+
+interface RunWithSteps {
+  id: string
+  sequence_step: number
+  sequences?: unknown
+}
+
+/**
+ * Mark a tracked draft row resolved — `sent` when the send is confirmed,
+ * `superseded` when a manual outgoing message replaced it — and re-anchor
+ * the run's already-scheduled next step on the actual send time (the
+ * plan's invariant: waits start from the real send, not draft creation).
+ * Returns the corrected due time, or null when no next step is scheduled.
+ */
+export async function resolveDraftRow(
+  supabase: SupabaseClient,
+  userId: string,
+  run: RunWithSteps,
+  rowId: string,
+  outcome: 'sent' | 'superseded',
+  actualSendTimeIso: string
+): Promise<string | null> {
+  const { error } = await supabase
+    .from('scheduled_follow_ups')
+    .update({ status: outcome, lease_expires_at: null, acted_at: new Date().toISOString() })
+    .eq('id', rowId)
+    .eq('user_id', userId)
+  if (error) throw new Error(`Failed to mark draft ${outcome}: ${error.message}`)
+
+  const step = stepsOf(run)[run.sequence_step - 1]
+  if (!step) return null
+
+  const due = nextDueFrom(actualSendTimeIso, step.delay_days)
+  const { error: schedError } = await supabase
+    .from('scheduled_follow_ups')
+    .update({ scheduled_for: due })
+    .eq('thread_id', run.id)
+    .eq('user_id', userId)
+    .in('status', ['pending', 'drafting'])
+  if (schedError) throw new Error(`Failed to reschedule next step: ${schedError.message}`)
+  return due
+}
+
+/**
  * Find all scheduled follow-ups that are due now. Called by the cron.
+ * Includes `drafting` rows whose lease expired (a Worker died mid-draft)
+ * so they are re-swept instead of stranded.
  */
 export async function getDueFollowUps(
   supabase: SupabaseClient
@@ -32,7 +127,7 @@ export async function getDueFollowUps(
   const { data, error } = await supabase
     .from('scheduled_follow_ups')
     .select('id, thread_id, user_id')
-    .eq('status', 'pending')
+    .or(`status.eq.pending,and(status.eq.drafting,lease_expires_at.lt.${now})`)
     .lte('scheduled_for', now)
     .limit(50)
 
@@ -236,7 +331,11 @@ export async function startSequence(
   }
 }
 
-/** Stop a run: no more drafts. Dismisses any pending follow-up. */
+/**
+ * Stop a run: no more drafts, and nothing left sendable. Dismisses every
+ * outstanding follow-up state (pending, mid-draft, created drafts) without
+ * deleting the Gmail drafts themselves — LeadLoop just makes them ineligible.
+ */
 export async function stopRun(supabase: SupabaseClient, userId: string, threadId: string) {
   const { data: thread, error } = await supabase
     .from('watched_threads')
@@ -247,13 +346,296 @@ export async function stopRun(supabase: SupabaseClient, userId: string, threadId
     .single()
   if (error || !thread) throw new Error('Run not found')
 
-  await supabase
+  const { error: dismissError } = await supabase
     .from('scheduled_follow_ups')
-    .update({ status: 'dismissed', acted_at: new Date().toISOString() })
+    .update({ status: 'dismissed', lease_expires_at: null, acted_at: new Date().toISOString() })
     .eq('thread_id', threadId)
-    .eq('status', 'pending')
+    .eq('user_id', userId)
+    .in('status', ['pending', 'drafting', ...OUTSTANDING_DRAFT_STATUSES])
+  if (dismissError) throw new Error(`Run stopped but cleanup failed: ${dismissError.message}`)
 
   return thread
+}
+
+export interface DraftNowResult {
+  queued: string[]
+  skipped: Array<{ run_id: string; reason: string }>
+}
+
+/**
+ * Queue the selected runs' pending follow-ups for immediate drafting via
+ * the existing queue consumer (all its gates stay in force). Cadence
+ * timestamps are never rewritten — the consumer drafts on demand, and the
+ * schedule re-anchors on the real send when it happens. Empty selection is
+ * an error, never "all"; results are itemized so "queued" is not "drafted".
+ */
+export async function draftNow(
+  supabase: SupabaseClient,
+  queue: Queue<FollowUpDraftMessage>,
+  userId: string,
+  runIds: string[]
+): Promise<DraftNowResult> {
+  const ids = [...new Set(runIds)]
+  if (ids.length === 0) throw new Error('run_ids must not be empty')
+  if (ids.length > 50) throw new Error('At most 50 runs per draft-now call')
+
+  const [runsRes, rowsRes] = await Promise.all([
+    supabase.from('watched_threads').select('id, status').eq('user_id', userId).in('id', ids),
+    supabase
+      .from('scheduled_follow_ups')
+      .select('id, thread_id, status')
+      .eq('user_id', userId)
+      .in('thread_id', ids)
+      .in('status', ['pending', 'drafting', ...OUTSTANDING_DRAFT_STATUSES]),
+  ])
+  if (runsRes.error) throw new Error(runsRes.error.message)
+  if (rowsRes.error) throw new Error(rowsRes.error.message)
+
+  const queued: string[] = []
+  const skipped: DraftNowResult['skipped'] = []
+  const messages: Array<{ body: FollowUpDraftMessage }> = []
+
+  for (const id of ids) {
+    const run = runsRes.data?.find((r) => r.id === id)
+    const rows = rowsRes.data?.filter((r) => r.thread_id === id) ?? []
+    const pendingRow = rows.find((r) => r.status === 'pending')
+
+    if (!run) skipped.push({ run_id: id, reason: 'run not found' })
+    else if (run.status !== 'active') skipped.push({ run_id: id, reason: `run is ${run.status}` })
+    else if (rows.some((r) => (OUTSTANDING_DRAFT_STATUSES as readonly string[]).includes(r.status)))
+      skipped.push({ run_id: id, reason: 'has an unsent LeadLoop draft — send it first' })
+    else if (rows.some((r) => r.status === 'drafting'))
+      skipped.push({ run_id: id, reason: 'already drafting' })
+    else if (!pendingRow) skipped.push({ run_id: id, reason: 'no pending follow-up' })
+    else {
+      queued.push(id)
+      messages.push({ body: { scheduledFollowUpId: pendingRow.id, userId } })
+    }
+  }
+
+  if (messages.length > 0) await queue.sendBatch(messages)
+  return { queued, skipped }
+}
+
+export type SendOutcome =
+  | 'sent'
+  | 'already_sent'
+  | 'skipped_reply'
+  | 'superseded'
+  | 'draft_missing'
+  | 'no_draft'
+  | 'not_found'
+  | 'failed'
+
+export interface SendDraftsResult {
+  results: Array<{
+    run_id: string
+    outcome: SendOutcome
+    detail?: string
+    next_draft_at?: string | null
+  }>
+}
+
+/**
+ * Send the selected runs' LeadLoop-created Gmail drafts — and only those:
+ * Gmail is addressed by the exact stored draft id, never listed. Requires
+ * explicit run ids (max 20; callers chunk larger selections). Each run is
+ * synced first and skipped if a reply or newer outgoing message appeared
+ * after draft creation. Partial failure never hides successful sends.
+ */
+export async function sendLeadLoopDrafts(
+  supabase: SupabaseClient,
+  env: GoogleEnv,
+  userId: string,
+  runIds: string[]
+): Promise<SendDraftsResult> {
+  const ids = [...new Set(runIds)]
+  if (ids.length === 0) throw new Error('run_ids must not be empty')
+  if (ids.length > 20) throw new Error('At most 20 runs per send call')
+
+  const [runsRes, profileRes] = await Promise.all([
+    supabase
+      .from('watched_threads')
+      .select('id, gmail_thread_id, status, sequence_step, sequences(steps)')
+      .eq('user_id', userId)
+      .in('id', ids),
+    supabase.from('profiles').select('gmail_refresh_token, gmail_email').eq('id', userId).single(),
+  ])
+  if (runsRes.error) throw new Error(runsRes.error.message)
+  const profile = profileRes.data
+  if (!profile?.gmail_refresh_token) {
+    throw new Error('No Gmail credentials on file — sign in on the dashboard first')
+  }
+
+  const { access_token } = await refreshAccessToken(
+    env.GOOGLE_CLIENT_ID,
+    env.GOOGLE_CLIENT_SECRET,
+    profile.gmail_refresh_token
+  )
+  const tokens = { accessToken: access_token }
+
+  const results: SendDraftsResult['results'] = []
+  for (const id of ids) {
+    const run = runsRes.data?.find((r) => r.id === id)
+    if (!run) {
+      results.push({ run_id: id, outcome: 'not_found' })
+      continue
+    }
+    try {
+      results.push(await sendRunDraft(supabase, env, tokens, userId, run, profile))
+    } catch (err) {
+      results.push({
+        run_id: id,
+        outcome: 'failed',
+        detail: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  return { results }
+}
+
+/** Send one run's current LeadLoop draft. Throwing = `failed` for that run only. */
+async function sendRunDraft(
+  supabase: SupabaseClient,
+  env: GoogleEnv,
+  tokens: { accessToken: string },
+  userId: string,
+  run: RunWithSteps & { gmail_thread_id: string },
+  profile: { gmail_refresh_token: string; gmail_email: string | null }
+): Promise<SendDraftsResult['results'][number]> {
+  const nowIso = new Date().toISOString()
+
+  // Outstanding LeadLoop drafts, newest first. Only rows with a stored
+  // draft id are sendable; older ones are stale history to reconcile.
+  const { data: rows, error: rowsError } = await supabase
+    .from('scheduled_follow_ups')
+    .select('id, status, acted_at, draft_gmail_id, lease_expires_at')
+    .eq('thread_id', run.id)
+    .eq('user_id', userId)
+    .in('status', [...OUTSTANDING_DRAFT_STATUSES])
+    .not('draft_gmail_id', 'is', null)
+    .order('acted_at', { ascending: false })
+  if (rowsError) throw new Error(rowsError.message)
+
+  const [current, ...stale] = rows ?? []
+  if (!current) return { run_id: run.id, outcome: 'no_draft' }
+
+  // Atomic claim: a fresh draft, a blocked draft_missing retry, or a
+  // crashed send whose lease expired (the retry that reconciles it).
+  const { data: claimed, error: claimError } = await supabase
+    .from('scheduled_follow_ups')
+    .update({ status: 'sending', lease_expires_at: leaseEnd() })
+    .eq('id', current.id)
+    .eq('user_id', userId)
+    .or(
+      `status.eq.draft_created,status.eq.draft_missing,and(status.eq.sending,lease_expires_at.lt.${nowIso})`
+    )
+    .select('id')
+    .maybeSingle()
+  if (claimError) throw new Error(claimError.message)
+  if (!claimed) {
+    const { data: fresh } = await supabase
+      .from('scheduled_follow_ups')
+      .select('status')
+      .eq('id', current.id)
+      .maybeSingle()
+    if (fresh?.status === 'sent') return { run_id: run.id, outcome: 'already_sent' }
+    return { run_id: run.id, outcome: 'failed', detail: 'draft is busy — try again shortly' }
+  }
+
+  const releaseTo = async (status: string) => {
+    await supabase
+      .from('scheduled_follow_ups')
+      .update({ status, lease_expires_at: null })
+      .eq('id', current.id)
+      .eq('user_id', userId)
+      .eq('status', 'sending')
+  }
+
+  try {
+    await syncThreadFromGmail(supabase, env, {
+      threadId: run.id,
+      gmailThreadId: run.gmail_thread_id,
+      userId,
+      refreshToken: profile.gmail_refresh_token,
+      userEmail: profile.gmail_email ?? '',
+    })
+    const { data: messages, error: msgError } = await supabase
+      .from('thread_messages')
+      .select('direction, sent_at')
+      .eq('thread_id', run.id)
+    if (msgError) throw new Error(msgError.message)
+    const msgs = messages ?? []
+
+    // A reply ends the run — same rule as the draft consumer.
+    if (msgs.some((m) => m.direction === 'received')) {
+      const { error: replyError } = await supabase
+        .from('watched_threads')
+        .update({ status: 'replied' })
+        .eq('id', run.id)
+        .eq('user_id', userId)
+      if (replyError) throw new Error(replyError.message)
+      const { error: dismissError } = await supabase
+        .from('scheduled_follow_ups')
+        .update({ status: 'dismissed', lease_expires_at: null, acted_at: new Date().toISOString() })
+        .eq('thread_id', run.id)
+        .eq('user_id', userId)
+        .in('status', ['pending', 'drafting', ...OUTSTANDING_DRAFT_STATUSES])
+      if (dismissError) throw new Error(dismissError.message)
+      return { run_id: run.id, outcome: 'skipped_reply' }
+    }
+
+    // Reconcile stale historical rows against real outgoing mail.
+    for (const row of stale) {
+      const sentAfter = newestOutgoingAfter(msgs, row.acted_at)
+      if (sentAfter) await resolveDraftRow(supabase, userId, run, row.id, 'superseded', sentAfter)
+    }
+
+    // A newer outgoing message means this draft already went out manually
+    // (or was replaced by a hand-written follow-up). Never double-send.
+    const manualSendAt = newestOutgoingAfter(msgs, current.acted_at)
+    if (manualSendAt) {
+      const wasOurSend = current.status === 'sending'
+      const next = await resolveDraftRow(
+        supabase,
+        userId,
+        run,
+        current.id,
+        wasOurSend ? 'sent' : 'superseded',
+        manualSendAt
+      )
+      return {
+        run_id: run.id,
+        outcome: wasOurSend ? 'already_sent' : 'superseded',
+        next_draft_at: next,
+      }
+    }
+
+    const sentMessage = await sendDraft(tokens, current.draft_gmail_id as string)
+    if (sentMessage) {
+      const next = await resolveDraftRow(
+        supabase,
+        userId,
+        run,
+        current.id,
+        'sent',
+        new Date().toISOString()
+      )
+      return { run_id: run.id, outcome: 'sent', next_draft_at: next }
+    }
+
+    // Gmail 404 with no send evidence: the draft vanished (deleted by
+    // hand?). Not success — block the cadence and surface it.
+    await releaseTo('draft_missing')
+    return {
+      run_id: run.id,
+      outcome: 'draft_missing',
+      detail: 'Gmail no longer has this draft and no newer outgoing message explains it',
+    }
+  } catch (err) {
+    await releaseTo(current.status === 'draft_missing' ? 'draft_missing' : 'draft_created')
+    throw err
+  }
 }
 
 /**

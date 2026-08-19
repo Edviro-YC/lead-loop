@@ -12,9 +12,11 @@ import {
   Pencil,
   Play,
   Plus,
+  Send,
   Square,
   Trash2,
   X,
+  Zap,
 } from "lucide-react";
 
 interface Step {
@@ -39,9 +41,20 @@ interface Run {
   last_activity_at: string | null;
 }
 
-interface Pending {
+interface Schedule {
   thread_id: string;
+  status: string;
   scheduled_for: string;
+  acted_at: string | null;
+}
+
+interface DraftNowResult {
+  queued: string[];
+  skipped: Array<{ run_id: string; reason: string }>;
+}
+
+interface SendDraftsResult {
+  results: Array<{ run_id: string; outcome: string; detail?: string }>;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -50,6 +63,33 @@ const STATUS_STYLES: Record<string, string> = {
   completed: "bg-muted text-muted-foreground",
   stopped: "bg-amber-100 text-amber-700",
 };
+
+const DRAFT_STATE_LABEL: Record<string, string> = {
+  draft_created: "draft ready to send",
+  sending: "sending…",
+  draft_missing: "draft missing in Gmail",
+};
+
+const SEND_OUTCOME_LABEL: Record<string, string> = {
+  sent: "Sent",
+  already_sent: "Already sent",
+  skipped_reply: "Skipped — lead replied",
+  superseded: "Superseded — a manual email replaced the draft",
+  draft_missing: "Draft missing in Gmail",
+  no_draft: "No unsent draft",
+  not_found: "Run not found",
+  failed: "Failed",
+};
+
+// Server caps per call; larger explicit selections are chunked client-side.
+const DRAFT_NOW_LIMIT = 50;
+const SEND_LIMIT = 20;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 /** Same contract as the Worker's lib/render.ts — {{email}} is auto-filled. */
 function requiredVariables(steps: Step[]): string[] {
@@ -70,11 +110,11 @@ async function callWorker<T = unknown>(path: string, body?: unknown): Promise<T>
 export function SequenceBoard({
   sequences,
   runs,
-  pending,
+  schedules,
 }: {
   sequences: Sequence[];
   runs: Run[];
-  pending: Pending[];
+  schedules: Schedule[];
 }) {
   const router = useRouter();
   const [editingSeq, setEditingSeq] = useState<Sequence | null>(null);
@@ -82,8 +122,118 @@ export function SequenceBoard({
   const [startingSeq, setStartingSeq] = useState<Sequence | null>(null);
   const [stepsDraft, setStepsDraft] = useState<Record<string, Step[]>>({});
   const [savingSteps, setSavingSteps] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [actionBusy, setActionBusy] = useState(false);
 
-  const nextDraftAt = new Map(pending.map((p) => [p.thread_id, p.scheduled_for]));
+  // Pending/draft states are kept separate: a run can have a created draft
+  // (sendable) and its next pending step (bumpable is exclusive of it).
+  const cadenceByRun = new Map<string, Schedule>();
+  const unsentDraftByRun = new Map<string, Schedule>();
+  for (const s of schedules) {
+    if (s.status === "pending" || s.status === "drafting") {
+      if (!cadenceByRun.has(s.thread_id)) cadenceByRun.set(s.thread_id, s);
+    } else {
+      const prev = unsentDraftByRun.get(s.thread_id);
+      if (!prev || (s.acted_at ?? "") > (prev.acted_at ?? "")) {
+        unsentDraftByRun.set(s.thread_id, s);
+      }
+    }
+  }
+
+  const canDraftNow = (run: Run) =>
+    run.status === "active" &&
+    cadenceByRun.get(run.id)?.status === "pending" &&
+    !unsentDraftByRun.has(run.id);
+  const canSend = (run: Run) => unsentDraftByRun.has(run.id);
+
+  const draftEligible = runs.filter(canDraftNow).map((r) => r.id);
+  const sendEligible = runs.filter(canSend).map((r) => r.id);
+  const allEligible = [...new Set([...draftEligible, ...sendEligible])];
+  const selectedDraftable = draftEligible.filter((id) => selected.has(id));
+  const selectedSendable = sendEligible.filter((id) => selected.has(id));
+
+  function toggleRun(id: string) {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next);
+  }
+
+  // "Select all" explicitly materializes every eligible run id — an empty
+  // selection is never treated as "all" anywhere in this flow.
+  function toggleSelectAllEligible() {
+    const allSelected = allEligible.length > 0 && allEligible.every((id) => selected.has(id));
+    setSelected(allSelected ? new Set() : new Set(allEligible));
+  }
+
+  async function handleDraftNow() {
+    if (selectedDraftable.length === 0 || actionBusy) return;
+    setActionBusy(true);
+    try {
+      let queued = 0;
+      const skipped: DraftNowResult["skipped"] = [];
+      for (const ids of chunk(selectedDraftable, DRAFT_NOW_LIMIT)) {
+        const res = await callWorker<DraftNowResult>("/api/runs/draft-now", { run_ids: ids });
+        queued += res.queued.length;
+        skipped.push(...res.skipped);
+      }
+      const lines = [`Queued ${queued} draft${queued === 1 ? "" : "s"} — they appear in Gmail momentarily.`];
+      if (skipped.length > 0) {
+        lines.push(`Skipped ${skipped.length}:`);
+        for (const s of skipped) lines.push(`• ${runEmail(s.run_id)}: ${s.reason}`);
+      }
+      alert(lines.join("\n"));
+      setSelected(new Set());
+      router.refresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleSendDrafts() {
+    if (selectedSendable.length === 0 || actionBusy) return;
+    const n = selectedSendable.length;
+    if (
+      !confirm(
+        `Send ${n} LeadLoop draft${n === 1 ? "" : "s"} to ${n === 1 ? "its recipient" : "their recipients"} now? ` +
+          "This sends real email and cannot be undone."
+      )
+    ) {
+      return;
+    }
+    setActionBusy(true);
+    try {
+      const results: SendDraftsResult["results"] = [];
+      for (const ids of chunk(selectedSendable, SEND_LIMIT)) {
+        const res = await callWorker<SendDraftsResult>("/api/runs/send-drafts", { run_ids: ids });
+        results.push(...res.results);
+      }
+      const counts = new Map<string, number>();
+      for (const r of results) counts.set(r.outcome, (counts.get(r.outcome) ?? 0) + 1);
+      const lines = [...counts.entries()].map(
+        ([outcome, count]) => `${SEND_OUTCOME_LABEL[outcome] ?? outcome}: ${count}`
+      );
+      for (const r of results) {
+        if (r.outcome === "failed" || r.outcome === "draft_missing") {
+          lines.push(`• ${runEmail(r.run_id)}: ${r.detail ?? r.outcome}`);
+        }
+      }
+      alert(lines.join("\n"));
+      setSelected(new Set());
+      router.refresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  function runEmail(runId: string): string {
+    const run = runs.find((r) => r.id === runId);
+    return run?.variables?.email ?? run?.subject ?? runId.slice(0, 8);
+  }
 
   const savedSteps = (seq: Sequence) => seq.steps ?? [];
   const steps = (seq: Sequence) => stepsDraft[seq.id] ?? savedSteps(seq);
@@ -184,6 +334,44 @@ export function SequenceBoard({
           New Sequence
         </button>
       </div>
+
+      {runs.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-border bg-muted/30 px-6 py-2.5">
+          <label className="flex items-center gap-2 text-xs font-medium">
+            <input
+              type="checkbox"
+              checked={allEligible.length > 0 && allEligible.every((id) => selected.has(id))}
+              onChange={toggleSelectAllEligible}
+              disabled={allEligible.length === 0 || actionBusy}
+              aria-label="Select all eligible runs"
+              className="h-3.5 w-3.5 accent-primary"
+            />
+            Select all eligible ({allEligible.length})
+          </label>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={handleDraftNow}
+              disabled={actionBusy || selectedDraftable.length === 0}
+              title="Create the next follow-up draft immediately for the selected runs. Drafts only — sends nothing."
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
+            >
+              <Zap className="h-3 w-3" />
+              {actionBusy ? "Working…" : `Draft now (${selectedDraftable.length}/${draftEligible.length})`}
+            </button>
+            <button
+              onClick={handleSendDrafts}
+              disabled={actionBusy || selectedSendable.length === 0}
+              title="Send the selected runs' LeadLoop-created Gmail drafts. Sends real email."
+              className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              <Send className="h-3 w-3" />
+              {actionBusy
+                ? "Working…"
+                : `Send LeadLoop drafts (${selectedSendable.length}/${sendEligible.length})`}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-8 p-6">
         {sequences.length === 0 && (
@@ -346,6 +534,7 @@ export function SequenceBoard({
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="text-left text-[10px] uppercase text-muted-foreground">
+                        <th className="w-6 pb-1.5 pr-2 font-medium"></th>
                         <th className="pb-1.5 pr-2 font-medium">To</th>
                         <th className="pb-1.5 pr-2 font-medium">Step</th>
                         <th className="pb-1.5 pr-2 font-medium">Status</th>
@@ -355,9 +544,22 @@ export function SequenceBoard({
                     </thead>
                     <tbody>
                       {seqRuns.map((run) => {
-                        const next = nextDraftAt.get(run.id);
+                        const next = cadenceByRun.get(run.id)?.scheduled_for;
+                        const unsentDraft = unsentDraftByRun.get(run.id);
                         return (
                           <tr key={run.id} className="border-t border-border/60">
+                            <td className="py-2 pr-2">
+                              {(canDraftNow(run) || canSend(run)) && (
+                                <input
+                                  type="checkbox"
+                                  checked={selected.has(run.id)}
+                                  onChange={() => toggleRun(run.id)}
+                                  disabled={actionBusy}
+                                  aria-label={`Select run to ${run.variables?.email ?? run.subject ?? "lead"}`}
+                                  className="h-3.5 w-3.5 accent-primary"
+                                />
+                              )}
+                            </td>
                             <td className="max-w-[220px] truncate py-2 pr-2">
                               <span className="font-medium">
                                 {run.variables?.email ?? "—"}
@@ -382,9 +584,15 @@ export function SequenceBoard({
                               </span>
                             </td>
                             <td className="py-2 pr-2 text-muted-foreground">
-                              {run.status === "active" && next
-                                ? new Date(next).toLocaleDateString()
-                                : "—"}
+                              {unsentDraft ? (
+                                <span className="font-medium text-amber-700">
+                                  {DRAFT_STATE_LABEL[unsentDraft.status] ?? unsentDraft.status}
+                                </span>
+                              ) : run.status === "active" && next ? (
+                                new Date(next).toLocaleDateString()
+                              ) : (
+                                "—"
+                              )}
                             </td>
                             <td className="py-2 text-right">
                               {run.status === "active" && (

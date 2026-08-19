@@ -40,13 +40,24 @@ export async function syncThreadFromGmail(
 
   const normalizedEmail = opts.userEmail.toLowerCase()
 
-  const rows = gmailThread.messages.map((gmailMsg) => {
+  // threads.get includes unsent DRAFT messages. They are not correspondence:
+  // storing them as "sent" made every fresh draft look like a newer outgoing
+  // message (the old draft-stacking bug, and a false supersede for sends).
+  const realMessages = gmailThread.messages.filter((m) => !m.labelIds?.includes('DRAFT'))
+
+  const rows = realMessages.map((gmailMsg) => {
     const from = getHeader(gmailMsg, 'From')
     const to = getHeader(gmailMsg, 'To')
     const subject = getHeader(gmailMsg, 'Subject')
     const bodyText = extractBody(gmailMsg)
     const sentAt = new Date(parseInt(gmailMsg.internalDate)).toISOString()
-    const direction = from.toLowerCase().includes(normalizedEmail) ? 'sent' : 'received'
+    // Gmail's own SENT label is authoritative (covers send-as aliases);
+    // the From-address comparison is only a fallback for old messages.
+    const direction =
+      gmailMsg.labelIds?.includes('SENT') ||
+      (normalizedEmail.length > 0 && from.toLowerCase().includes(normalizedEmail))
+        ? 'sent'
+        : 'received'
 
     return {
       thread_id: opts.threadId,
@@ -61,10 +72,17 @@ export async function syncThreadFromGmail(
     }
   })
 
-  await supabase.from('thread_messages').upsert(rows, { onConflict: 'gmail_message_id' })
+  // Callers make send/skip decisions off these rows; a silently failed
+  // sync would let them act on stale data, so storage failures throw.
+  const { error: upsertError } = await supabase
+    .from('thread_messages')
+    .upsert(rows, { onConflict: 'gmail_message_id' })
+  if (upsertError) {
+    throw new Error(`Thread sync failed to store messages: ${upsertError.message}`)
+  }
 
-  const lastMessage = gmailThread.messages[gmailThread.messages.length - 1]
-  await supabase
+  const lastMessage = realMessages[realMessages.length - 1]
+  const { error: updateError } = await supabase
     .from('watched_threads')
     .update({
       last_synced_at: new Date().toISOString(),
@@ -74,4 +92,7 @@ export async function syncThreadFromGmail(
         : undefined,
     })
     .eq('id', opts.threadId)
+  if (updateError) {
+    throw new Error(`Thread sync failed to update run: ${updateError.message}`)
+  }
 }

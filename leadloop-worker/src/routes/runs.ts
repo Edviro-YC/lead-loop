@@ -1,9 +1,34 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../lib/types'
 import { syncThreadFromGmail } from '../jobs/thread-sync'
-import { startSequence, stopRun, saveRunAsExample } from '../services/runs'
+import {
+  startSequence,
+  stopRun,
+  saveRunAsExample,
+  draftNow,
+  sendLeadLoopDrafts,
+} from '../services/runs'
 
 const runs = new Hono<AppEnv>()
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * HTTP trust boundary for bulk run selections: explicit, non-empty,
+ * deduplicated UUID arrays with a hard cap. Empty never means "all".
+ */
+function parseRunIds(body: unknown, max: number): string[] {
+  const raw = (body as { run_ids?: unknown } | null)?.run_ids
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('run_ids must be a non-empty array of run UUIDs')
+  }
+  const ids = [...new Set(raw)]
+  if (ids.length > max) throw new Error(`At most ${max} runs per call`)
+  if (!ids.every((id) => typeof id === 'string' && UUID_RE.test(id))) {
+    throw new Error('run_ids must be UUIDs')
+  }
+  return ids as string[]
+}
 
 /** List runs, optionally filtered by status or sequence. */
 runs.get('/', async (c) => {
@@ -43,6 +68,33 @@ runs.post('/start', async (c) => {
       variables: body.variables,
     })
     return c.json(result, 201)
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+  }
+})
+
+/** Bump selected runs' pending follow-ups to draft immediately. Drafts only. */
+runs.post('/draft-now', async (c) => {
+  try {
+    const ids = parseRunIds(await c.req.json(), 50)
+    const result = await draftNow(
+      c.get('supabase'),
+      c.env.FOLLOW_UP_DRAFT_QUEUE,
+      c.get('userId'),
+      ids
+    )
+    return c.json(result)
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+  }
+})
+
+/** Send selected runs' LeadLoop-created Gmail drafts. Sends real email. */
+runs.post('/send-drafts', async (c) => {
+  try {
+    const ids = parseRunIds(await c.req.json(), 20)
+    const result = await sendLeadLoopDrafts(c.get('supabase'), c.env, c.get('userId'), ids)
+    return c.json(result)
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
   }

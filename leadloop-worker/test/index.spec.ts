@@ -122,7 +122,7 @@ describe('MCP endpoint', () => {
       })
       expect(response.status).toBe(200)
       const body = await readJsonRpc<{ result: { tools: Array<{ name: string }> } }>(response)
-      expect(body.result.tools).toHaveLength(14)
+      expect(body.result.tools).toHaveLength(16)
       expect(body.result.tools.map((t) => t.name)).toContain('start_sequence')
     })
 
@@ -184,17 +184,43 @@ describe('MCP server tools', () => {
       'create_sequence',
       'delete_example',
       'delete_sequence',
+      'draft_now',
       'get_run',
       'get_sequence',
       'list_examples',
       'list_runs',
       'list_sequences',
       'save_run_as_example',
+      'send_leadloop_drafts',
       'start_sequence',
       'stop_run',
       'update_example',
       'update_sequence',
     ])
+
+    // Both bulk tools demand an explicit non-empty selection — an empty or
+    // missing run_ids can never mean "all" — and send is marked destructive.
+    const draftNow = tools.find((t) => t.name === 'draft_now')!
+    expect(draftNow.inputSchema.required).toEqual(['run_ids'])
+    const draftIds = draftNow.inputSchema.properties?.run_ids as {
+      minItems?: number
+      maxItems?: number
+    }
+    expect(draftIds.minItems).toBe(1)
+    expect(draftIds.maxItems).toBe(50)
+    expect(draftNow.annotations?.destructiveHint).toBe(false)
+
+    const sendDrafts = tools.find((t) => t.name === 'send_leadloop_drafts')!
+    expect(sendDrafts.inputSchema.required).toEqual(['run_ids'])
+    const sendIds = sendDrafts.inputSchema.properties?.run_ids as {
+      minItems?: number
+      maxItems?: number
+    }
+    expect(sendIds.minItems).toBe(1)
+    expect(sendIds.maxItems).toBe(20)
+    expect(sendDrafts.annotations?.destructiveHint).toBe(true)
+    expect(sendDrafts.annotations?.idempotentHint).toBe(true)
+    expect(sendDrafts.description).toContain('SENDS REAL EMAIL')
 
     await client.close()
   })

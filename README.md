@@ -11,7 +11,7 @@ You (or your AI agents) write and send the personalized first email. Then you ta
 - **Examples** — tag winning runs so your GTM team can study what worked
 - **Three doors to enroll a thread** — MCP tool for agents, Gmail sidebar for one-offs, dashboard form for everything else (including phone sends)
 
-LeadLoop never sends emails and never writes copy. It renders your steps and keeps the cadence.
+LeadLoop never writes copy and sends only on an explicit dashboard/MCP action ("Send LeadLoop drafts", and only drafts it created). Otherwise it renders your steps, creates drafts, and keeps the cadence.
 
 ## The core workflow
 
@@ -254,13 +254,13 @@ claude mcp add --transport http leadloop \
   --header "X-User-Email: you@example.com"
 ```
 
-The 14 tools:
+The 16 tools:
 
 - **Sequences** — `list_sequences`, `get_sequence` (steps + the union of required variables), `create_sequence` (name + inline `steps: [{body, delay_days}]`), `update_sequence` (also replaces steps wholesale), `delete_sequence`.
-- **Runs** — `start_sequence` (enroll by `recipient_email` or `gmail_thread_id` + variables; strict validation), `list_runs`, `get_run` (progress + messages), `stop_run`, `save_run_as_example`.
+- **Runs** — `start_sequence` (enroll by `recipient_email` or `gmail_thread_id` + variables; strict validation), `list_runs`, `get_run` (progress + messages + `next_draft_at`/`unsent_draft_status`), `draft_now` (bump selected runs' next draft to now; drafts only), `send_leadloop_drafts` (send selected runs' LeadLoop-created drafts — sends real email, requires explicit run ids), `stop_run`, `save_run_as_example`.
 - **Examples** — `list_examples` (text search + tag/outcome/sequence filters), `create_example`, `update_example`, `delete_example`.
 
-The agent workflow: `create_sequence(name, steps)` once, then per lead — write and send the first email, `start_sequence(sequence_id, recipient_email, variables)`.
+The agent workflow: `create_sequence(name, steps)` once, then per lead — write and send the first email, `start_sequence(sequence_id, recipient_email, variables)`. Drafts appear on cadence (or on `draft_now`); nothing is sent until you (or an agent) explicitly call `send_leadloop_drafts` with run ids.
 
 Local test (needs `MCP_API_KEY` in `.dev.vars`): run `npm run dev` in `leadloop-worker/`, then:
 
@@ -329,7 +329,7 @@ cd leadloop-worker && npm test
 1. **Auth**: Users sign in with Google via Supabase Auth. The OAuth flow captures a Gmail refresh token, enabling the Worker to fetch mail and create drafts on their behalf.
 2. **Gmail Add-on**: A thin Apps Script client that renders Cards in the Gmail sidebar. All business logic lives in the Worker — the add-on just makes API calls.
 3. **Enrollment**: `start_sequence` (MCP, sidebar, or dashboard — one shared code path) resolves the thread from your sent mail if you only give an email address, validates variables against every step in the sequence, creates the run, and schedules step 1 at last-sent-time + the step's `delay_days`.
-4. **The engine**: A cron job checks every 10 minutes for due steps and queues draft creation. The job re-syncs the thread first: a reply dismisses the follow-up and marks the run `replied`; an unsent previous draft defers the step. Otherwise it renders the step body with the run's variables, creates a threaded Gmail draft (never sends), advances the step, and schedules the next one. Runs complete when steps run out.
+4. **The engine**: A cron job checks every 10 minutes for due steps and queues draft creation (the dashboard/MCP "Draft now" enqueues the same jobs immediately). The consumer atomically leases each row, re-syncs the thread, and reconciles first: a reply dismisses the follow-up and marks the run `replied`; a previous draft sent manually is marked `superseded` and the cadence re-anchors on the real send time; an unsent previous draft defers the step. Otherwise it renders the step body with the run's variables, creates a threaded Gmail draft, advances the step, and schedules the next one. Sending happens only via the explicit "Send LeadLoop drafts" action (dashboard or MCP), which sends the exact stored draft ids and reschedules the next step from the actual send. Runs complete when steps run out.
 5. **Examples**: Saving a run copies the full conversation into one `outreach_examples` row (subject, rendered thread text, tags, the winning sequence). Self-contained — it survives thread deletion.
 6. **Security**: All tables use Row Level Security. The add-on authenticates via a shared API key + user email header. The dashboard uses Supabase JWT auth. The MCP endpoint uses its own bearer API key + user email header, and every tool query is scoped to that user.
 

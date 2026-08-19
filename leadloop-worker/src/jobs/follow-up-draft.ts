@@ -1,7 +1,15 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { FollowUpDraftMessage } from '../lib/types'
 import { refreshAccessToken, createDraft } from '../services/gmail'
-import { scheduleStep, bareEmail, type SequenceStep } from '../services/runs'
+import {
+  scheduleStep,
+  bareEmail,
+  leaseEnd,
+  stepsOf,
+  newestOutgoingAfter,
+  resolveDraftRow,
+  OUTSTANDING_DRAFT_STATUSES,
+} from '../services/runs'
 import { renderTemplate } from '../lib/render'
 import { syncThreadFromGmail } from './thread-sync'
 
@@ -13,169 +21,247 @@ interface DraftEnv {
 /**
  * Create the next follow-up draft for a run. No AI: the body is the
  * current step of the sequence with the run's stored {{variables}}
- * filled in. Called by the follow-up-draft queue consumer; throwing
- * lets the queue retry (e.g. transient Gmail failures).
+ * filled in. Called by the follow-up-draft queue consumer (fed by the
+ * cron sweep and by explicit Draft-now bumps); throwing lets the queue
+ * retry (e.g. transient Gmail failures).
  */
 export async function processFollowUpDraft(
   supabase: SupabaseClient,
   env: DraftEnv,
   msg: FollowUpDraftMessage
 ): Promise<void> {
-  const { data: followUp } = await supabase
+  const nowIso = new Date().toISOString()
+
+  // Atomic claim (pending -> drafting). Also reclaims a drafting row whose
+  // lease expired — a Worker died mid-draft. Losing the claim means the row
+  // is already handled or actively owned, so cron/bump double-enqueues and
+  // queue redeliveries collapse into no-ops here.
+  const { data: claimedRow, error: claimError } = await supabase
     .from('scheduled_follow_ups')
-    .select('id, thread_id, status')
+    .update({ status: 'drafting', lease_expires_at: leaseEnd() })
     .eq('id', msg.scheduledFollowUpId)
-    .single()
+    .eq('user_id', msg.userId)
+    .or(`status.eq.pending,and(status.eq.drafting,lease_expires_at.lt.${nowIso})`)
+    .select('id, thread_id')
+    .maybeSingle()
+  if (claimError) throw new Error(`Follow-up claim failed: ${claimError.message}`)
+  if (!claimedRow) return
 
-  if (!followUp || followUp.status !== 'pending') return
+  const threadId = claimedRow.thread_id
 
-  const threadId = followUp.thread_id
-
-  const [{ data: thread }, { data: profile }] = await Promise.all([
-    supabase
-      .from('watched_threads')
-      .select(
-        'gmail_thread_id, subject, status, sequence_id, sequence_step, variables, sequences(steps)'
-      )
-      .eq('id', threadId)
-      .single(),
-    supabase
-      .from('profiles')
-      .select('gmail_refresh_token, gmail_email')
-      .eq('id', msg.userId)
-      .single(),
-  ])
-
-  if (!thread) {
-    console.error(`Thread ${threadId} not found`)
-    return
-  }
-  if (!profile?.gmail_refresh_token) {
-    console.error(`No Gmail credentials for user ${msg.userId}`)
-    return
-  }
-
-  const dismiss = () =>
-    supabase
+  // Transition our claimed row; the status guard makes this (and the
+  // release in the catch) a no-op once the row has moved on.
+  const patchRow = async (patch: Record<string, unknown>) => {
+    const { error } = await supabase
       .from('scheduled_follow_ups')
-      .update({ status: 'dismissed', acted_at: new Date().toISOString() })
+      .update({ lease_expires_at: null, ...patch })
       .eq('id', msg.scheduledFollowUpId)
-
-  // A stopped/replied/completed run never drafts.
-  if (thread.status !== 'active' || !thread.sequence_id) {
-    await dismiss()
-    return
+      .eq('status', 'drafting')
+    if (error) throw new Error(`Follow-up state update failed: ${error.message}`)
   }
+  const dismiss = () => patchRow({ status: 'dismissed', acted_at: new Date().toISOString() })
 
-  await syncThreadFromGmail(supabase, env, {
-    threadId,
-    gmailThreadId: thread.gmail_thread_id,
-    userId: msg.userId,
-    refreshToken: profile.gmail_refresh_token,
-    userEmail: profile.gmail_email ?? '',
-  })
+  try {
+    const [{ data: thread }, { data: profile }] = await Promise.all([
+      supabase
+        .from('watched_threads')
+        .select(
+          'gmail_thread_id, subject, status, sequence_id, sequence_step, variables, sequences(steps)'
+        )
+        .eq('id', threadId)
+        .maybeSingle(),
+      supabase
+        .from('profiles')
+        .select('gmail_refresh_token, gmail_email')
+        .eq('id', msg.userId)
+        .single(),
+    ])
 
-  const { data: messages } = await supabase
-    .from('thread_messages')
-    .select('direction, to_email, sent_at')
-    .eq('thread_id', threadId)
-    .order('sent_at', { ascending: true })
-  const msgs = messages ?? []
+    if (!thread) {
+      // Orphaned schedule row (run deleted); close it out rather than retry forever.
+      console.error(`Thread ${threadId} not found`)
+      await dismiss()
+      return
+    }
+    if (!profile?.gmail_refresh_token) {
+      console.error(`No Gmail credentials for user ${msg.userId}`)
+      await patchRow({ status: 'pending' }) // retry once credentials return
+      return
+    }
 
-  // A reply ends the run.
-  if (msgs.some((m) => m.direction === 'received')) {
-    await dismiss()
-    await supabase.from('watched_threads').update({ status: 'replied' }).eq('id', threadId)
-    return
-  }
+    // A stopped/replied/completed run never drafts.
+    if (thread.status !== 'active' || !thread.sequence_id) {
+      await dismiss()
+      return
+    }
 
-  const lastSent = [...msgs].reverse().find((m) => m.direction === 'sent')
-  if (!lastSent?.to_email) {
-    throw new Error(`Cannot determine follow-up recipient for thread ${threadId}`)
-  }
+    await syncThreadFromGmail(supabase, env, {
+      threadId,
+      gmailThreadId: thread.gmail_thread_id,
+      userId: msg.userId,
+      refreshToken: profile.gmail_refresh_token,
+      userEmail: profile.gmail_email ?? '',
+    })
 
-  // Previous step's draft still sitting unsent? Defer a day instead of
-  // stacking drafts (nothing outbound has appeared since it was created).
-  const { data: prevDrafts } = await supabase
-    .from('scheduled_follow_ups')
-    .select('acted_at')
-    .eq('thread_id', threadId)
-    .eq('status', 'draft_created')
-    .order('acted_at', { ascending: false })
-    .limit(1)
-  const prevDraftAt = prevDrafts?.[0]?.acted_at
-  if (prevDraftAt && new Date(lastSent.sent_at ?? 0) <= new Date(prevDraftAt)) {
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    await supabase
+    const { data: messages, error: msgError } = await supabase
+      .from('thread_messages')
+      .select('direction, to_email, sent_at')
+      .eq('thread_id', threadId)
+      .order('sent_at', { ascending: true })
+    if (msgError) throw new Error(`Failed to load thread messages: ${msgError.message}`)
+    const msgs = messages ?? []
+
+    // A reply ends the run.
+    if (msgs.some((m) => m.direction === 'received')) {
+      const { error: replyError } = await supabase
+        .from('watched_threads')
+        .update({ status: 'replied' })
+        .eq('id', threadId)
+      if (replyError) throw new Error(`Failed to mark run replied: ${replyError.message}`)
+      await dismiss()
+      return
+    }
+
+    const run = { id: threadId, sequence_step: thread.sequence_step, sequences: thread.sequences }
+
+    // Reconcile outstanding drafts from earlier steps. A newer outgoing
+    // message resolves them (sent manually -> superseded, or a crashed
+    // send that actually went out -> sent) and re-anchors this step's due
+    // time on that real send. Unresolved ones block: never stack a new
+    // draft behind an unsent or missing one.
+    const { data: outstanding, error: outError } = await supabase
       .from('scheduled_follow_ups')
-      .update({ scheduled_for: tomorrow.toISOString() })
-      .eq('id', msg.scheduledFollowUpId)
-    return
-  }
+      .select('id, status, acted_at, lease_expires_at')
+      .eq('thread_id', threadId)
+      .eq('user_id', msg.userId)
+      .in('status', [...OUTSTANDING_DRAFT_STATUSES])
+    if (outError) throw new Error(`Failed to load outstanding drafts: ${outError.message}`)
 
-  // Current step. None = past the end (stale schedule): close out.
-  // PostgREST types the to-one join loosely, hence the cast.
-  const seq = thread.sequences as unknown as { steps?: SequenceStep[] } | null
-  const steps = seq?.steps ?? []
-  const step = steps[thread.sequence_step - 1]
+    let correctedDue: string | null = null
+    let blocked = false
+    for (const row of outstanding ?? []) {
+      const leaseActive =
+        row.status === 'sending' &&
+        row.lease_expires_at !== null &&
+        new Date(row.lease_expires_at) > new Date()
+      if (leaseActive) {
+        blocked = true // a send is in flight right now
+        continue
+      }
+      const sentAfter = newestOutgoingAfter(msgs, row.acted_at)
+      if (sentAfter) {
+        correctedDue = await resolveDraftRow(
+          supabase,
+          msg.userId,
+          run,
+          row.id,
+          row.status === 'sending' ? 'sent' : 'superseded',
+          sentAfter
+        )
+      } else {
+        blocked = true
+      }
+    }
 
-  if (!step) {
-    await dismiss()
-    await supabase.from('watched_threads').update({ status: 'completed' }).eq('id', threadId)
-    return
-  }
+    if (blocked) {
+      const tomorrow = new Date()
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      await patchRow({ status: 'pending', scheduled_for: tomorrow.toISOString() })
+      return
+    }
+    if (correctedDue && new Date(correctedDue) > new Date()) {
+      // The manual send re-anchored this step into the future; run when due.
+      // (Draft-now bumps only queue runs with no outstanding drafts, so a
+      // bump never lands here — it drafts immediately below.)
+      await patchRow({ status: 'pending' }) // scheduled_for already corrected
+      return
+    }
 
-  const variables = {
-    email: bareEmail(lastSent.to_email),
-    ...((thread.variables ?? {}) as Record<string, string>),
-  }
-  const body = renderTemplate(step.body, variables)
-  const subject = `Re: ${thread.subject ?? ''}`
+    const lastSent = [...msgs].reverse().find((m) => m.direction === 'sent')
+    if (!lastSent?.to_email) {
+      throw new Error(`Cannot determine follow-up recipient for thread ${threadId}`)
+    }
 
-  const { access_token } = await refreshAccessToken(
-    env.GOOGLE_CLIENT_ID,
-    env.GOOGLE_CLIENT_SECRET,
-    profile.gmail_refresh_token
-  )
+    // Current step. None = past the end (stale schedule): close out.
+    const steps = stepsOf(thread)
+    const step = steps[thread.sequence_step - 1]
 
-  const draft = await createDraft(
-    { accessToken: access_token },
-    lastSent.to_email,
-    subject,
-    body,
-    thread.gmail_thread_id
-  )
+    if (!step) {
+      const { error: completeError } = await supabase
+        .from('watched_threads')
+        .update({ status: 'completed' })
+        .eq('id', threadId)
+      if (completeError) throw new Error(`Failed to complete run: ${completeError.message}`)
+      await dismiss()
+      return
+    }
 
-  await supabase
-    .from('scheduled_follow_ups')
-    .update({
+    const variables = {
+      email: bareEmail(lastSent.to_email),
+      ...((thread.variables ?? {}) as Record<string, string>),
+    }
+    const body = renderTemplate(step.body, variables)
+    const subject = `Re: ${thread.subject ?? ''}`
+
+    const { access_token } = await refreshAccessToken(
+      env.GOOGLE_CLIENT_ID,
+      env.GOOGLE_CLIENT_SECRET,
+      profile.gmail_refresh_token
+    )
+
+    const draft = await createDraft(
+      { accessToken: access_token },
+      lastSent.to_email,
+      subject,
+      body,
+      thread.gmail_thread_id
+    )
+
+    // From here the Gmail draft exists. patchRow throwing after this point
+    // releases nothing (status guard), so a retry cannot double-draft;
+    // delivery is at-least-once only in the instant between these two calls.
+    await patchRow({
       status: 'draft_created',
       draft_gmail_id: draft.id,
       generated_body: body,
       acted_at: new Date().toISOString(),
     })
-    .eq('id', msg.scheduledFollowUpId)
 
-  // Advance; schedule the next step or complete the run.
-  const nextStep = thread.sequence_step + 1
-  const next = steps[nextStep - 1]
+    // Advance; schedule the next step or complete the run. The next wait is
+    // anchored on draft creation for now and re-anchored on the actual send
+    // by resolveDraftRow when the send is observed.
+    const nextStep = thread.sequence_step + 1
+    const next = steps[nextStep - 1]
 
-  if (next) {
-    const { error: stepError } = await supabase
-      .from('watched_threads')
-      .update({ sequence_step: nextStep })
-      .eq('id', threadId)
-    if (stepError) {
-      throw new Error(
-        `Draft ${draft.id} created but failed to advance sequence step: ${stepError.message}`
-      )
+    if (next) {
+      const { error: stepError } = await supabase
+        .from('watched_threads')
+        .update({ sequence_step: nextStep })
+        .eq('id', threadId)
+      if (stepError) {
+        throw new Error(
+          `Draft ${draft.id} created but failed to advance sequence step: ${stepError.message}`
+        )
+      }
+      await scheduleStep(supabase, threadId, msg.userId, new Date(), next.delay_days)
+    } else {
+      const { error: completeError } = await supabase
+        .from('watched_threads')
+        .update({ sequence_step: nextStep, status: 'completed' })
+        .eq('id', threadId)
+      if (completeError) {
+        throw new Error(`Draft ${draft.id} created but failed to complete run: ${completeError.message}`)
+      }
     }
-    await scheduleStep(supabase, threadId, msg.userId, new Date(), next.delay_days)
-  } else {
+  } catch (err) {
+    // Release our claim so the retry/next cron can take it; the status
+    // guard makes this a no-op if the row already transitioned. If this
+    // release itself fails, the lease expiry is the fallback.
     await supabase
-      .from('watched_threads')
-      .update({ sequence_step: nextStep, status: 'completed' })
-      .eq('id', threadId)
+      .from('scheduled_follow_ups')
+      .update({ status: 'pending', lease_expires_at: null })
+      .eq('id', msg.scheduledFollowUpId)
+      .eq('status', 'drafting')
+    throw err
   }
 }

@@ -24,6 +24,7 @@ interface GmailMessage {
   threadId: string
   internalDate: string
   snippet: string
+  labelIds?: string[]
   payload: GmailPart & {
     headers: Array<{ name: string; value: string }>
   }
@@ -128,6 +129,34 @@ export async function createDraft(
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`Gmail createDraft failed (${res.status}): ${err}`)
+  }
+
+  return res.json()
+}
+
+/**
+ * Send an existing draft by its immutable draft id (drafts.send), so
+ * only the exact draft LeadLoop created can ever go out. Returns the
+ * sent message, or null when Gmail no longer has the draft — the
+ * caller decides whether that means "sent manually" or "missing".
+ */
+export async function sendDraft(
+  tokens: GmailTokens,
+  draftId: string
+): Promise<{ id: string; threadId: string } | null> {
+  const res = await fetch(`${GMAIL_API}/users/me/drafts/send`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokens.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ id: draftId }),
+  })
+
+  if (res.status === 404) return null
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Gmail sendDraft failed (${res.status}): ${err}`)
   }
 
   return res.json()
